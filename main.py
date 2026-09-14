@@ -5,6 +5,7 @@ from openai import OpenAI
 import pymysql
 import json
 import datetime
+import chromadb
 
 app = FastAPI()
 
@@ -12,6 +13,9 @@ client = OpenAI(
     api_key=os.environ["DEEPSEEK_API_KEY"],
     base_url="https://api.deepseek.com"
 )
+
+chroma_client = chromadb.Client()
+collection = chroma_client.create_collection(name="my_docs")
 
 def get_db_connection():
     return pymysql.connect(
@@ -30,6 +34,20 @@ def get_current_time():
 def calculate(expression):
     a = eval(expression)
     return a
+
+def split_text(text, chunk_size=300):
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunk = text[start : start + chunk_size]
+        chunks.append(chunk)
+        start += chunk_size
+    return chunks
+
+def add_document(text):
+    chunks = split_text(text)
+    ids = [f"chunk_{i}" for i in range(len(chunks))]
+    collection.add(documents=chunks, ids=ids)
 
 tools = [
     {
@@ -65,6 +83,14 @@ class ChatMessage(BaseModel):
     message: str
     user_id: str
 
+class DocumentUpload(BaseModel):
+    text: str
+
+@app.post("/upload_doc")
+def upload_doc(data: DocumentUpload):
+    add_document(data.text)
+    return {"message": "Document stored"}
+
 @app.post("/chat")
 def chat(data: ChatMessage):
     conn = get_db_connection()
@@ -82,6 +108,15 @@ def chat(data: ChatMessage):
     )
     rows = cursor.fetchall()
     chat_history = [{"role": r[0], "content": r[1]} for r in rows]
+
+    results = collection.query(query_texts=[data.message], n_results=3)
+    retrieved_chunks = results["documents"][0]
+    context_text = "\n".join(retrieved_chunks)
+
+    chat_history.insert(0, {
+        "role": "system",
+        "content": f"Reference material that may or may not be relevant:\n{context_text}\nIf it isn't relevant to the question, ignore it."
+    })
 
     response = client.chat.completions.create(
         model="deepseek-chat",
