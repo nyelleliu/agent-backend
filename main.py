@@ -14,8 +14,8 @@ client = OpenAI(
     base_url="https://api.deepseek.com"
 )
 
-chroma_client = chromadb.Client()
-collection = chroma_client.create_collection(name="my_docs")
+chroma_client = chromadb.PersistentClient(path="./chroma_data")
+collection = chroma_client.get_or_create_collection(name="my_docs")
 
 def get_db_connection():
     return pymysql.connect(
@@ -109,9 +109,20 @@ def chat(data: ChatMessage):
     rows = cursor.fetchall()
     chat_history = [{"role": r[0], "content": r[1]} for r in rows]
 
-    results = collection.query(query_texts=[data.message], n_results=3)
-    retrieved_chunks = results["documents"][0]
-    context_text = "\n".join(retrieved_chunks)
+    results = collection.query(
+        query_texts=[data.message],
+        n_results=3,
+        include=["documents", "distances"]
+    )
+    distances = results["distances"][0]
+    documents = results["documents"][0]
+
+    filtered_chunks = []
+    for i in range(len(documents)):
+        if distances[i] < 1.0:
+            filtered_chunks.append(documents[i])
+
+    context_text = "\n".join(filtered_chunks) if filtered_chunks else "No relevant reference material found."
 
     chat_history.insert(0, {
         "role": "system",
