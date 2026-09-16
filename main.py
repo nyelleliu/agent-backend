@@ -1,5 +1,5 @@
 ﻿import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 import pymysql
@@ -32,8 +32,13 @@ def get_current_time():
     return f"Now is {now.strftime('%Y-%m-%d %H:%M:%S')}, {weekday_map[now.weekday()]}"
 
 def calculate(expression):
-    a = eval(expression)
-    return a
+    try:
+        a = eval(expression)
+        return a
+    except ZeroDivisionError:
+        return "Error: division by zero"
+    except Exception as e:
+        return f"Error: {e}"
 
 def split_text(text, chunk_size=300):
     chunks = []
@@ -93,8 +98,11 @@ def upload_doc(data: DocumentUpload):
 
 @app.post("/chat")
 def chat(data: ChatMessage):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database connection failed: {e}")
 
     cursor.execute(
         "INSERT INTO messages (role, content, user_id) VALUES (%s, %s, %s)",
