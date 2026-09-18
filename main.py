@@ -200,9 +200,14 @@ def chat(data: ChatMessage, user_id: int = Depends(get_current_user), db = Depen
     distances = results["distances"][0]
     documents = results["documents"][0]
 
+    with open("debug_log.txt", "a", encoding="utf-8") as f:
+        f.write(f"Query: {data.message}\n")
+        f.write(f"Distances: {distances}\n")
+        f.write(f"Documents: {documents}\n\n")
+
     filtered_chunks = []
     for i in range(len(documents)):
-        if distances[i] < 1.0:
+        if distances[i] < 1.5:
             filtered_chunks.append(documents[i])
 
     context_text = "\n".join(filtered_chunks) if filtered_chunks else "No relevant reference material found."
@@ -253,3 +258,5 @@ def chat(data: ChatMessage, user_id: int = Depends(get_current_user), db = Depen
     db.commit()
 
     return {"reply": reply}
+
+
