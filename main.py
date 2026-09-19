@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from openai import OpenAI
 import datetime
 import chromadb
+from app.tools import tool_registry
 import bcrypt
 import jwt
 import redis
@@ -145,20 +146,6 @@ def get_db():
     finally:
         db.close()
 
-def get_current_time():
-    now = datetime.datetime.now()
-    weekday_map = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    return f"Now is {now.strftime('%Y-%m-%d %H:%M:%S')}, {weekday_map[now.weekday()]}"
-
-def calculate(expression):
-    try:
-        a = eval(expression)
-        return a
-    except ZeroDivisionError:
-        return "Error: division by zero"
-    except Exception as e:
-        return f"Error: {e}"
-
 def is_greeting(message):
     greetings = ["你好", "hi", "hello", "嗨", "早上好", "晚上好", "在吗"]
     return any(g in message.lower() for g in greetings)
@@ -209,32 +196,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     payload = decode_token(token)
     return payload["user_id"]
 
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_current_time",
-            "description": "Get the current date, time and day of week",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "calculate",
-            "description": "Calculate a math expression, e.g. addition, subtraction, multiplication, division",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "The math expression to calculate, e.g. 23 * 47"
-                    }
-                }
-            }
-        }
-    }
-]
+tools = tool_registry.schemas()
 
 class ChatMessage(BaseModel):
     message: str
@@ -332,14 +294,7 @@ def chat(data: ChatMessage, user_id: int = Depends(get_current_user), db = Depen
         })
 
         for tc in msg.tool_calls:
-            if tc.function.name == "get_current_time":
-                result = get_current_time()
-            elif tc.function.name == "calculate":
-                args = json.loads(tc.function.arguments)
-                expression = args["expression"]
-                result = calculate(expression)
-            else:
-                result = "unknown tool"
+            result = tool_registry.execute(tc.function.name, tc.function.arguments)
 
             chat_history.append({
                 "role": "tool",
