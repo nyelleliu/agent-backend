@@ -1,17 +1,22 @@
 ﻿import os
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from openai import OpenAI
-import json
 import datetime
 import chromadb
 import bcrypt
 import jwt
+import redis
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.exc import IntegrityError
+from prompts import CHAT_SYSTEM_PROMPT
 
 app = FastAPI()
 security = HTTPBearer()
@@ -23,6 +28,8 @@ client = OpenAI(
 
 chroma_client = chromadb.PersistentClient(path="./chroma_data")
 collection = chroma_client.get_or_create_collection(name="my_docs")
+
+redis_client = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
 SECRET_KEY = os.environ["JWT_SECRET_KEY"]
 
@@ -55,17 +62,33 @@ class ConversationSummary(Base):
 COMPRESSION_THRESHOLD = 20
 
 def get_chat_history(user_id, db):
-    summary_record = db.query(ConversationSummary).filter(
-        ConversationSummary.user_id == str(user_id)
-    ).first()
+    cache_key = f"summary:{user_id}"
+    cached_data = redis_client.get(cache_key)
 
-    if summary_record:
+    if cached_data:
+        parsed = json.loads(cached_data)
+        summary_text = parsed["summary"]
+        covers_up_to = parsed["covers_up_to"]
+    else:
+        summary_record = db.query(ConversationSummary).filter(
+            ConversationSummary.user_id == str(user_id)
+        ).first()
+        if summary_record:
+            summary_text = summary_record.summary_text
+            covers_up_to = summary_record.covers_up_to_message_id
+            cache_value = json.dumps({"summary": summary_text, "covers_up_to": covers_up_to})
+            redis_client.setex(cache_key, 300, cache_value)
+        else:
+            summary_text = None
+            covers_up_to = 0
+
+    if summary_text:
         recent_rows = db.query(Message).filter(
             Message.user_id == str(user_id),
-            Message.id > summary_record.covers_up_to_message_id
+            Message.id > covers_up_to
         ).order_by(Message.id).all()
 
-        chat_history = [{"role": "system", "content": f"Summary of earlier conversation: {summary_record.summary_text}"}]
+        chat_history = [{"role": "system", "content": f"Summary of earlier conversation: {summary_text}"}]
         chat_history += [{"role": m.role, "content": m.content} for m in recent_rows]
     else:
         all_rows = db.query(Message).filter(Message.user_id == str(user_id)).order_by(Message.id).all()
@@ -112,6 +135,8 @@ def maybe_compress_history(user_id, db):
         db.add(new_record)
 
     db.commit()
+
+    redis_client.delete(f"summary:{user_id}")
 
 def get_db():
     db = SessionLocal()
@@ -263,29 +288,27 @@ def chat(data: ChatMessage, user_id: int = Depends(get_current_user), db = Depen
 
     chat_history = get_chat_history(user_id, db)
 
-    results = collection.query(
-        query_texts=[data.message],
-        n_results=3,
-        include=["documents", "distances"]
-    )
-    distances = results["distances"][0]
-    documents = results["documents"][0]
+    if is_greeting(data.message):
+        context_text = "No reference material needed for this greeting."
+    else:
+        results = collection.query(
+            query_texts=[data.message],
+            n_results=3,
+            include=["documents", "distances"]
+        )
+        distances = results["distances"][0]
+        documents = results["documents"][0]
 
-    with open("debug_log.txt", "a", encoding="utf-8") as f:
-        f.write(f"Query: {data.message}\n")
-        f.write(f"Distances: {distances}\n")
-        f.write(f"Documents: {documents}\n\n")
+        filtered_chunks = []
+        for i in range(len(documents)):
+            if distances[i] < 1.5:
+                filtered_chunks.append(documents[i])
 
-    filtered_chunks = []
-    for i in range(len(documents)):
-        if distances[i] < 1.5:
-            filtered_chunks.append(documents[i])
-
-    context_text = "\n".join(filtered_chunks) if filtered_chunks else "No relevant reference material found."
+        context_text = "\n".join(filtered_chunks) if filtered_chunks else "No relevant reference material found."
 
     chat_history.insert(0, {
         "role": "system",
-        "content": f"Reference material that may or may not be relevant:\n{context_text}\nIf it isn't relevant to the question, ignore it."
+        "content": CHAT_SYSTEM_PROMPT.format(context_text=context_text)
     })
 
     reply = "Sorry, I couldn't complete this after several tool calls."
@@ -331,11 +354,4 @@ def chat(data: ChatMessage, user_id: int = Depends(get_current_user), db = Depen
     maybe_compress_history(user_id, db)
 
     return {"reply": reply}
-
-
-
-
-
-
-
 
