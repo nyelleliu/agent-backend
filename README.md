@@ -1,212 +1,591 @@
 # Agent Backend
 
-A FastAPI backend service for an AI agent with tool calling, RAG-based document Q&A, persistent conversation memory, and multi-user support.
+一个基于 FastAPI + DeepSeek + ChromaDB + Redis + MySQL 构建的企业内部智能查询 Agent。
 
-一个基于 FastAPI 的 AI Agent 后端服务，支持工具调用、RAG文档问答、持久化对话记忆和多用户隔离。
+项目目标不是简单实现一个 Chatbot，而是逐步构建一个具备 **Tool Calling、Agent Loop、RAG、Memory、Skill、用户认证** 等能力的 Agent 后端。
 
-## Overview / 项目简介
+## 当前版本
 
-This project implements a conversational AI backend that goes beyond a simple chat wrapper. It follows the core agent architecture pattern — the model can request tool calls (e.g. calculation, current time), the server executes them, and the results are fed back to the model before producing a final response. It also supports RAG (Retrieval-Augmented Generation): users can upload documents, which are chunked and embedded into a persistent vector store (Chroma), and relevant chunks — filtered by similarity threshold — are retrieved and injected into the conversation whenever a question is asked, letting the agent answer questions about private/custom knowledge it was never trained on. Conversation history is persisted in MySQL rather than kept in memory, so context survives server restarts. Each user's conversation is isolated by `user_id`. The service also handles common failure modes (invalid math expressions, database connectivity issues) gracefully rather than crashing.
+**v0.2 — Agent Architecture Refactor**
 
-这个项目实现的不只是一个简单的对话接口，而是完整的 agent 架构模式：模型可以请求调用工具（比如计算、查询当前时间），服务器负责真正执行，再把结果返回给模型生成最终回复。项目同时支持 RAG（检索增强生成）：用户可以上传文档，文档会被切片并向量化存入持久化的向量数据库（Chroma），每次提问时会按相似度阈值过滤、检索相关片段并注入对话上下文，使 agent 能够回答训练数据中不存在的私有/自定义知识问题。对话历史存储在 MySQL 而不是内存里，因此服务重启后上下文依然保留。每个用户的对话通过 `user_id` 相互隔离。服务对常见的故障情况（非法数学表达式、数据库连接异常）也做了优雅处理，而不是直接崩溃。
+当前已经完成：
 
-## Features / 功能特点
+- Tool Registry
+- Agent Loop
+- Skill Registry
+- Knowledge Search Skill
+- RAG 文档检索
+- MySQL 持久化对话
+- Redis 对话摘要缓存
+- JWT 用户认证
+- 自动化测试
 
-- **RAG document Q&A with persistence and relevance filtering** — upload arbitrary text documents; they're chunked, embedded, and stored in a Chroma vector store persisted to disk (survives restarts). On each chat request, the most relevant chunks are retrieved and filtered by a similarity-distance threshold, so irrelevant documents no longer pollute unrelated answers.
-  **RAG 文档问答，支持持久化与相关性过滤** —— 上传任意文本文档，系统自动切片、向量化并存入持久化到磁盘的 Chroma 向量数据库（服务重启后数据不丢失）。每次对话时检索最相关的片段，并按相似度距离阈值过滤，不再让不相关的文档内容干扰无关问题的回答。
+---
 
-- **Graceful error handling** — invalid math expressions (e.g. division by zero) are caught and return a clear message instead of crashing the tool; database connectivity failures return a proper `503 Service Unavailable` with a descriptive error, instead of an opaque `500` crash.
-  **优雅的错误处理** —— 非法数学表达式（如除以0）会被捕获并返回清晰的提示，而不是让工具崩溃；数据库连接失败会返回规范的 `503 Service Unavailable` 状态码及具体错误信息，而不是一次难以排查的 `500` 崩溃。
+## 项目架构
 
-- **Multi-turn conversation with persistent memory** — chat history is stored in MySQL and reloaded on every request, so context is never lost even after a server restart.
-  **多轮对话与持久化记忆** —— 对话历史存储在 MySQL 中，每次请求都会重新加载，即使服务重启，上下文也不会丢失。
-
-- **Tool calling (agent loop)** — the LLM can call registered tools (a calculator and a date/time lookup) when it needs information it can't reliably produce itself. This avoids the common failure mode of LLMs miscalculating large numbers.
-  **工具调用（agent 循环）** —— 大模型在需要自己无法可靠得出的信息时，可以调用已注册的工具（计算器、日期时间查询），避免了大模型心算大数字容易出错的常见问题。
-
-- **Multi-user isolation** — conversations are scoped by `user_id`, so different users' histories never mix.
-  **多用户隔离** —— 对话按 `user_id` 区分，不同用户的历史记录互不干扰。
-
-- **Secrets managed via environment variables** — API keys and database credentials are never hardcoded; they're read from environment variables at runtime.
-  **敏感信息通过环境变量管理** —— API key 和数据库密码从不写死在代码里，运行时从环境变量读取。
-
-## Tech Stack / 技术栈
-
-- **FastAPI** — web framework and REST API / Web 框架与接口层
-- **MySQL**（通过 `pymysql`） — persistent storage for conversation history / 持久化存储对话历史
-- **Chroma**（persistent client） — vector database for RAG document storage and retrieval / RAG 文档存储与检索的向量数据库（持久化模式）
-- **DeepSeek API**（OpenAI 兼容接口） — the underlying LLM / 底层大模型
-- **Pydantic** — request validation / 请求数据校验
-
-## Architecture / 架构流程
-
-### Chat flow / 对话流程
-
-```
-User request 用户请求
-    ↓
-Attempt DB connection — on failure, raise HTTPException(503) 尝试连接数据库，失败则返回503
-    ↓
-Save user message to MySQL 存入用户消息
-    ↓
-Load full conversation history for this user_id 读取该用户完整历史
-    ↓
-Retrieve top-3 chunks from Chroma, filter by similarity distance < 1.0
-从 Chroma 检索最相关的3个片段，按相似度距离<1.0过滤
-    ↓
-Inject filtered chunks as a system message (or "no relevant material" if none pass)
-将过滤后的片段作为system消息注入（若无片段通过过滤则注明"无相关资料"）
-    ↓
-Send history + tool definitions + retrieved context to the LLM
-发送历史+工具清单+检索到的上下文给大模型
-    ↓
-   Does the model request a tool call? 模型是否请求工具调用？
-   ├─ No 否  → return the model's text reply 直接返回文字回复
-   └─ Yes 是 → execute the requested tool(s) locally (errors caught and returned as messages, not crashes)
-              本地执行工具（错误被捕获并作为消息返回，而非导致程序崩溃）
-              ↓
-           feed tool results back into the conversation 把结果塞回对话
-              ↓
-           call the LLM again for a final reply 再次调用模型拿最终回复
-    ↓
-Save assistant reply to MySQL 存入assistant回复
-    ↓
-Return reply to user 返回给用户
+```text
+Agent Backend
+│
+├── main.py
+│   └── FastAPI API
+│
+├── app/
+│   ├── agent/
+│   │   └── loop.py
+│   │       └── Agent Loop
+│   │
+│   ├── tools/
+│   │   ├── registry.py
+│   │   ├── calculator.py
+│   │   └── datetime.py
+│   │       └── Tool Registry
+│   │
+│   └── skills/
+│       ├── base.py
+│       ├── registry.py
+│       └── knowledge.py
+│           └── Knowledge Search Skill
+│
+├── tests/
+│   ├── test_main.py
+│   ├── test_tools.py
+│   └── test_skills.py
+│
+├── chroma_data/
+│   └── Persistent Vector Database
+│
+└── MySQL
+    ├── Users
+    ├── Messages
+    └── Conversation Summaries
 ```
 
-This mirrors the core loop used by coding agents like Claude Code / CoreCoder: the LLM never executes anything itself — it only requests actions, and the backend is responsible for executing them and feeding results back.
+---
 
-这套循环跟 Claude Code / CoreCoder 这类编程 agent 的核心逻辑是一致的：大模型自己从不真正执行任何操作，它只是"请求"动作，真正的执行和结果反馈由后端负责。
+## Agent 工作流程
 
-### Document ingestion flow / 文档入库流程
-
+```text
+用户请求
+   ↓
+FastAPI
+   ↓
+JWT 身份认证
+   ↓
+加载用户历史消息
+   ↓
+RAG / Skill
+   ↓
+Agent Loop
+   ↓
+LLM 判断是否需要调用 Tool / Skill
+   │
+   ├── 不需要
+   │      ↓
+   │   直接生成回答
+   │
+   └── 需要
+          ↓
+      Tool / Skill Registry
+          ↓
+      执行工具
+          ↓
+      返回执行结果
+          ↓
+      再次调用 LLM
+          ↓
+      最终回答
+   ↓
+保存对话
+   ↓
+返回用户
 ```
-Raw document text 原始文档
-    ↓
-Split into fixed-size chunks (300 chars, sliding window) 切分为固定大小的片段
-    ↓
-Each chunk is embedded into a vector (handled automatically by Chroma)
-每个片段被转换为向量（Chroma自动完成）
-    ↓
-Stored in a persistent Chroma collection with a unique id
-以唯一id存入持久化的Chroma集合（写入磁盘）
+
+Agent 的核心思想是：
+
+> **LLM 负责决策，Backend 负责执行。**
+
+LLM 不直接执行 Python、数据库查询或其他后端操作，而是通过 Tool Calling 请求后端执行具体能力。
+
+---
+
+## Tool Registry
+
+项目已经将原来的工具函数重构为统一的 Tool Registry。
+
+目前包含：
+
+### `calculate`
+
+执行数学表达式，例如：
+
+```text
+23 * 47
 ```
+
+底层使用 AST 解析，而不是直接使用 `eval()`，避免执行任意 Python 代码。
+
+### `get_current_time`
+
+返回当前日期、时间和星期。
+
+Tool Registry 负责：
+
+```text
+Tool
+ ↓
+注册
+ ↓
+Schema
+ ↓
+LLM Tool Calling
+ ↓
+参数解析与校验
+ ↓
+执行
+ ↓
+返回结果
+```
+
+这样以后增加工具时，不需要继续在 Agent 中堆积大量 `if / elif`。
+
+---
+
+## Agent Loop
+
+Agent Loop 位于：
+
+```text
+app/agent/loop.py
+```
+
+核心逻辑：
+
+```text
+LLM
+ ↓
+是否产生 tool_call？
+ │
+ ├── 否 → 返回最终答案
+ │
+ └── 是
+      ↓
+   执行 Tool / Skill
+      ↓
+   将结果加入 messages
+      ↓
+   再次请求 LLM
+      ↓
+   最终答案
+```
+
+当前最大执行步数为 `5`，用于避免 Agent 无限循环。
+
+---
+
+## Skill Architecture
+
+除了基础 Tool 之外，项目还引入了 Skill。
+
+目前实现：
+
+```text
+SkillRegistry
+      │
+      └── KnowledgeSearchSkill
+```
+
+### Knowledge Search Skill
+
+用于查询企业知识库。
+
+调用流程：
+
+```text
+用户问题
+   ↓
+KnowledgeSearchSkill
+   ↓
+Chroma 查询 Top 3
+   ↓
+距离过滤
+   ↓
+返回相关文档片段
+   ↓
+LLM 生成最终回答
+```
+
+当前代码使用的距离阈值：
+
+```text
+distance < 1.5
+```
+
+Tool 和 Skill 在架构上分开管理，但当前都会通过 OpenAI-compatible Tool Calling 机制暴露给 LLM。
+
+---
+
+## RAG
+
+项目使用 ChromaDB 作为持久化向量数据库。
+
+文档处理流程：
+
+```text
+原始文档
+   ↓
+文本切分
+   ↓
+Chunk
+   ↓
+Chroma Embedding
+   ↓
+Vector Database
+```
+
+查询流程：
+
+```text
+用户问题
+   ↓
+Chroma Query
+   ↓
+Top 3 chunks
+   ↓
+距离过滤
+   ↓
+相关文档
+   ↓
+Agent / LLM
+```
+
+当前项目使用简单的固定长度文本切分：
+
+```text
+chunk_size = 300
+```
+
+Chroma 数据持久化在：
+
+```text
+./chroma_data
+```
+
+该目录不提交到 Git。
+
+---
+
+## Conversation Memory
+
+项目目前使用：
+
+```text
+MySQL + Redis
+```
+
+保存和管理对话记忆。
+
+### MySQL
+
+保存：
+
+- 用户
+- 对话消息
+- Conversation Summary
+
+### Redis
+
+用于缓存 Conversation Summary，减少频繁访问数据库。
+
+当历史消息达到一定数量后：
+
+```text
+大量历史消息
+      ↓
+LLM Summary
+      ↓
+ConversationSummary
+      ↓
+Redis Cache
+      ↓
+后续对话继续使用
+```
+
+当前压缩阈值：
+
+```text
+COMPRESSION_THRESHOLD = 20
+```
+
+---
+
+## 用户认证
+
+项目已经加入 JWT 用户认证。
+
+核心流程：
+
+```text
+Register
+   ↓
+密码 bcrypt Hash
+   ↓
+MySQL
+
+Login
+   ↓
+验证密码
+   ↓
+生成 JWT
+   ↓
+访问需要认证的 API
+```
+
+JWT 中包含用户身份信息，并使用过期时间控制 Token 有效期。
+
+因此不同用户的对话数据可以进行隔离。
+
+---
 
 ## API
 
-### `POST /chat`
+当前主要 API：
 
-**Request body / 请求体：**
-```json
-{
-  "message": "What's 8947 * 2368?",
-  "user_id": "user_123"
-}
+```text
+POST /register
+POST /login
+POST /upload_doc
+POST /chat
 ```
 
-**Response / 返回：**
-```json
-{
-  "reply": "8947 × 2368 = 21,186,496."
-}
+完整接口可以通过 FastAPI Swagger 查看：
+
+```text
+http://127.0.0.1:8000/docs
 ```
 
-**Error response（示例：数据库不可用）:**
-```json
-{
-  "detail": "Database connection failed: (2003, \"Can't connect to MySQL server on 'localhost'...\")"
-}
-```
-Status: `503 Service Unavailable`
+---
 
-### `POST /upload_doc`
+## Tech Stack
 
-**Request body / 请求体：**
-```json
-{
-  "text": "Full text of a document to be chunked and stored for retrieval."
-}
-```
+| 技术 | 用途 |
+|---|---|
+| FastAPI | Web API |
+| DeepSeek API | LLM |
+| OpenAI SDK | 调用 OpenAI-compatible API |
+| ChromaDB | 向量数据库 / RAG |
+| MySQL | 用户、消息、摘要持久化 |
+| Redis | Memory Summary 缓存 |
+| SQLAlchemy | ORM |
+| JWT | 用户认证 |
+| bcrypt | 密码 Hash |
+| Pydantic | 数据校验 |
+| pytest | 自动化测试 |
 
-**Response / 返回：**
-```json
-{
-  "message": "Document stored"
-}
-```
+---
 
-## Setup / 环境搭建
+## 项目测试
 
-### Prerequisites / 前置要求
-- Python 3.10+
-- MySQL 8.0+
-- A DeepSeek API key（或任意 OpenAI 兼容的模型接口）
+当前项目已经加入：
 
-### Database setup / 数据库准备
+- Tool Registry 测试
+- Calculator 安全测试
+- Skill Registry 测试
+- FastAPI API 测试
+- RAG 文本切分测试
 
-```sql
-CREATE DATABASE agent_db;
-USE agent_db;
+当前测试结果：
 
-CREATE TABLE messages (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    role VARCHAR(20),
-    content TEXT,
-    user_id VARCHAR(50),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+```text
+19 passed
 ```
 
-### Install dependencies / 安装依赖
+---
+
+## 项目演进
+
+### v0.1 — Basic Agent
+
+最初版本主要实现：
+
+```text
+FastAPI
+  ↓
+LLM
+  ↓
+Tool Calling
+  ↓
+Calculator / Current Time
+```
+
+同时加入了基础 RAG 和 MySQL Conversation Memory。
+
+### v0.2 — Agent Architecture Refactor
+
+当前版本重点进行 Agent 架构重构：
+
+```text
+Tool
+  ↓
+Tool Registry
+
+Skill
+  ↓
+Skill Registry
+
+LLM
+  ↓
+Agent Loop
+  ↓
+Tool / Skill
+```
+
+使项目从一个简单的 AI API，逐渐演变成模块化 Agent Backend。
+
+---
+
+## Roadmap
+
+后续计划：
+
+```text
+v0.2
+├── Tool Registry ✓
+├── Agent Loop ✓
+├── Skill Registry ✓
+└── Knowledge Search Skill ✓
+
+        ↓
+
+v0.3
+├── RAG Architecture Improvement
+├── Permission Control
+├── Better Memory
+└── Evaluation
+
+        ↓
+
+v0.4
+├── Planning
+├── MCP
+└── Multi-Agent
+
+        ↓
+
+v1.0
+└── Enterprise AI Agent Platform
+```
+
+最终目标：
+
+> 构建一个能够查询企业知识、调用业务工具、分析数据，并根据用户权限完成多步骤任务的企业级 AI Agent。
+
+---
+
+## Learning Goals
+
+这个项目同时作为 Agent 学习项目。
+
+通过实际代码理解：
+
+```text
+LLM
+ ↓
+Tool Calling
+ ↓
+Agent Loop
+ ↓
+Tool Registry
+ ↓
+Skill
+ ↓
+RAG
+ ↓
+Memory
+ ↓
+Planning
+ ↓
+MCP
+ ↓
+Multi-Agent
+```
+
+最终能够从工程实现角度回答 Agent 实习面试中的核心问题。
+
+---
+
+## Setup
+
+### Requirements
+
+```text
+Python 3.10+
+MySQL
+Redis
+DeepSeek API Key
+```
+
+### Install
 
 ```bash
-pip install fastapi uvicorn pymysql openai chromadb
+pip install fastapi uvicorn pymysql openai chromadb redis sqlalchemy bcrypt python-jose pytest
 ```
 
-### Set environment variables / 设置环境变量
+### Environment Variables
 
-```bash
-export DEEPSEEK_API_KEY="your-api-key"
-export MYSQL_PASSWORD="your-mysql-password"
+```text
+DEEPSEEK_API_KEY
+MYSQL_PASSWORD
+JWT_SECRET
 ```
 
-（Windows PowerShell 下用：`$env:DEEPSEEK_API_KEY="..."`）
-
-### Run / 启动服务
+### Run
 
 ```bash
 uvicorn main:app --reload
 ```
 
-The API will be available at `http://127.0.0.1:8000`, with interactive docs at `http://127.0.0.1:8000/docs`.
+API：
 
-服务启动后可通过 `http://127.0.0.1:8000` 访问，交互式接口文档在 `http://127.0.0.1:8000/docs`。
+```text
+http://127.0.0.1:8000
+```
 
-Note: the Chroma vector store persists to a local `chroma_data/` directory (excluded from version control). This is created automatically on first run.
+Swagger：
 
-注意：Chroma 向量数据库会持久化到本地的 `chroma_data/` 目录（已从版本控制中排除），首次运行时会自动创建。
+```text
+http://127.0.0.1:8000/docs
+```
 
-## Available Tools / 已实现的工具
+---
 
-| Tool 工具 | Description 说明 |
-|---|---|
-| `calculate` | Evaluates a math expression（如 `"23 * 47"`），并对非法表达式（如除以0）做了错误处理 —— 避免大模型自己心算大数字时出错。 |
-| `get_current_time` | Returns the current date, time and day of the week —— 大模型自身无法得知的实时信息。 |
+## Project Status
 
-## Known Limitations / 已知局限
+当前项目已经完成：
 
-- **No user authentication** — `user_id` is currently supplied directly by the client with no verification.
-  **暂无用户认证** —— `user_id` 目前由调用方直接传入，没有验证机制。
-- **Embedding uses Chroma's default local model** — sufficient for demonstration purposes, but a production system would likely use a dedicated embedding API for better retrieval accuracy.
-  **Embedding 使用 Chroma 自带的本地默认模型** —— 用于演示已经足够，生产环境通常会使用专门的 embedding API 以获得更好的检索精度。
-- **Error handling covers the most common failure paths, not all of them** — LLM API timeouts and Chroma-side failures are not yet wrapped in explicit error handling.
-  **错误处理覆盖了最常见的故障路径，但并非全部** —— 大模型API超时、Chroma端的故障目前尚未做显式的错误处理。
+```text
+✓ FastAPI Backend
+✓ DeepSeek LLM
+✓ Tool Calling
+✓ Tool Registry
+✓ Agent Loop
+✓ Skill Registry
+✓ Knowledge Search Skill
+✓ RAG
+✓ MySQL Memory
+✓ Redis Summary Cache
+✓ JWT Authentication
+✓ Automated Tests
+```
 
-## Possible Extensions / 可扩展方向
+项目正在从：
 
-- User authentication（补充登录鉴权）
-- Similarity threshold as a configurable parameter, not hardcoded（相似度阈值参数化，而非写死）
-- Error handling for LLM API timeouts and Chroma failures（补充大模型超时和Chroma故障的错误处理）
-- Additional tools（网页搜索、天气 API 等）
-- Streaming responses（流式返回）
-- Rate limiting / usage tracking per user（限流与用量统计）
+```text
+简单 AI Chat Backend
+```
+
+逐步演进为：
+
+```text
+企业内部智能查询 Agent
+```
