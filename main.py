@@ -45,6 +45,74 @@ class Message(Base):
     user_id = Column(String(50))
     created_at = Column(DateTime, server_default=func.now())
 
+class ConversationSummary(Base):
+    __tablename__ = "conversation_summaries"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String(50), unique=True)
+    summary_text = Column(Text)
+    covers_up_to_message_id = Column(Integer)
+
+COMPRESSION_THRESHOLD = 20
+
+def get_chat_history(user_id, db):
+    summary_record = db.query(ConversationSummary).filter(
+        ConversationSummary.user_id == str(user_id)
+    ).first()
+
+    if summary_record:
+        recent_rows = db.query(Message).filter(
+            Message.user_id == str(user_id),
+            Message.id > summary_record.covers_up_to_message_id
+        ).order_by(Message.id).all()
+
+        chat_history = [{"role": "system", "content": f"Summary of earlier conversation: {summary_record.summary_text}"}]
+        chat_history += [{"role": m.role, "content": m.content} for m in recent_rows]
+    else:
+        all_rows = db.query(Message).filter(Message.user_id == str(user_id)).order_by(Message.id).all()
+        chat_history = [{"role": m.role, "content": m.content} for m in all_rows]
+
+    return chat_history
+
+def maybe_compress_history(user_id, db):
+    summary_record = db.query(ConversationSummary).filter(
+        ConversationSummary.user_id == str(user_id)
+    ).first()
+
+    covers_up_to = summary_record.covers_up_to_message_id if summary_record else 0
+
+    uncovered_rows = db.query(Message).filter(
+        Message.user_id == str(user_id),
+        Message.id > covers_up_to
+    ).order_by(Message.id).all()
+
+    if len(uncovered_rows) < COMPRESSION_THRESHOLD:
+        return
+
+    conversation_text = "\n".join([f"{m.role}: {m.content}" for m in uncovered_rows])
+
+    summary_response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[
+            {"role": "system", "content": "Summarize the following conversation concisely, preserving key facts and context."},
+            {"role": "user", "content": conversation_text}
+        ]
+    )
+    new_summary_text = summary_response.choices[0].message.content
+    new_covers_up_to = uncovered_rows[-1].id
+
+    if summary_record:
+        summary_record.summary_text = new_summary_text
+        summary_record.covers_up_to_message_id = new_covers_up_to
+    else:
+        new_record = ConversationSummary(
+            user_id=str(user_id),
+            summary_text=new_summary_text,
+            covers_up_to_message_id=new_covers_up_to
+        )
+        db.add(new_record)
+
+    db.commit()
+
 def get_db():
     db = SessionLocal()
     try:
@@ -65,6 +133,10 @@ def calculate(expression):
         return "Error: division by zero"
     except Exception as e:
         return f"Error: {e}"
+
+def is_greeting(message):
+    greetings = ["你好", "hi", "hello", "嗨", "早上好", "晚上好", "在吗"]
+    return any(g in message.lower() for g in greetings)
 
 def split_text(text, chunk_size=300):
     chunks = []
@@ -189,8 +261,7 @@ def chat(data: ChatMessage, user_id: int = Depends(get_current_user), db = Depen
     db.add(user_message)
     db.commit()
 
-    history_rows = db.query(Message).filter(Message.user_id == str(user_id)).order_by(Message.id).all()
-    chat_history = [{"role": m.role, "content": m.content} for m in history_rows]
+    chat_history = get_chat_history(user_id, db)
 
     results = collection.query(
         query_texts=[data.message],
@@ -257,6 +328,14 @@ def chat(data: ChatMessage, user_id: int = Depends(get_current_user), db = Depen
     db.add(assistant_message)
     db.commit()
 
+    maybe_compress_history(user_id, db)
+
     return {"reply": reply}
+
+
+
+
+
+
 
 

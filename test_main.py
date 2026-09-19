@@ -1,6 +1,6 @@
 ﻿import uuid
 from fastapi.testclient import TestClient
-from main import calculate, split_text, app
+from main import calculate, split_text, is_greeting, app
 
 client = TestClient(app)
 
@@ -31,3 +31,10 @@ def test_register_new_user():
         "password": "testpass123"
     })
     assert response.status_code == 200
+
+
+def test_is_greeting_true():
+    assert is_greeting("你好") == True
+
+def test_is_greeting_false():
+    assert is_greeting("一线城市住宿费标准是多少") == False
