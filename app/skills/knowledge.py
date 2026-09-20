@@ -5,6 +5,7 @@ from app.skills.base import Skill
 
 class KnowledgeSearchSkill(Skill):
     name = "knowledge_search"
+    permission = "knowledge_search"
     description = "Search the enterprise knowledge base for relevant information"
 
     parameters = {
@@ -18,8 +19,9 @@ class KnowledgeSearchSkill(Skill):
         "required": ["query"],
     }
 
-    def __init__(self, collection):
+    def __init__(self, collection, tool_registry):
         self.collection = collection
+        self.tool_registry = tool_registry
 
     def run(self, arguments: dict[str, Any]) -> str:
         query = arguments.get("query", "")
@@ -46,3 +48,5 @@ class KnowledgeSearchSkill(Skill):
             return "No relevant reference material found."
 
         return "\n".join(filtered_chunks)
+
+

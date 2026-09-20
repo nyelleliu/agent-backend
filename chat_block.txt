@@ -1,0 +1,55 @@
+﻿@app.post("/chat")
+def chat(
+    data: ChatMessage,
+    user_id: int = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    user = db.query(User).filter(
+        User.id == user_id
+    ).first()
+
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found"
+        )
+
+    user_message = Message(
+        role="user",
+        content=data.message,
+        user_id=str(user_id)
+    )
+
+    db.add(user_message)
+    db.commit()
+
+    chat_history = memory_manager.get_chat_history(
+        user_id,
+        db
+    )
+
+    context_text = (
+        "Reference material will be retrieved by the "
+        "knowledge_search skill when needed."
+    )
+    chat_history.insert(
+        0,
+        {
+            "role": "system",
+            "content": CHAT_SYSTEM_PROMPT.format(
+                context_text=context_text
+            )
+        }
+    )
+
+    # Agent Loop
+    reply = agent_loop.run(
+        chat_history,
+        role=user.role,
+    )
+
+    assistant_message = Message(
+        role="assistant",
+        content=reply,
+        user_id=str(user_id)
+    )

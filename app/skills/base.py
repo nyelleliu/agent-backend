@@ -5,6 +5,7 @@ from typing import Any
 class Skill(ABC):
     name: str
     description: str
+    permission: str
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": {},

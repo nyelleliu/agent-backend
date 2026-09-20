@@ -12,8 +12,11 @@ import datetime
 import chromadb
 from app.tools import tool_registry
 from app.agent.loop import AgentLoop
+from app.permissions.checker import PermissionChecker
 from app.skills import skill_registry
 from app.skills.knowledge import KnowledgeSearchSkill
+from app.skills.data_analysis import DataAnalysisSkill
+from app.memory.manager import MemoryManager
 import bcrypt
 import jwt
 import redis
@@ -34,18 +37,30 @@ client = OpenAI(
 )
 
 
-agent_loop = AgentLoop(client, tool_registry, skill_registry)
+permission_checker = PermissionChecker()
+
+agent_loop = AgentLoop(
+    client,
+    tool_registry,
+    skill_registry,
+    permission_checker,
+)
 
 
 chroma_client = chromadb.PersistentClient(path="./chroma_data")
 collection = chroma_client.get_or_create_collection(name="my_docs")
 
-skill_registry.register(KnowledgeSearchSkill(collection))
+skill_registry.register(KnowledgeSearchSkill(collection, tool_registry))
+
+skill_registry.register(
+    DataAnalysisSkill(tool_registry)
+)
 
 redis_client = redis.Redis(
     host="localhost",
     port=6379,
-    decode_responses=True
+    decode_responses=True,
+    protocol=2
 )
 
 
@@ -64,6 +79,7 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     username = Column(String(50), unique=True)
     password_hash = Column(String(255))
+    role = Column(String(20), default="employee")
 
 
 class Message(Base):
@@ -88,124 +104,21 @@ class ConversationSummary(Base):
 COMPRESSION_THRESHOLD = 20
 
 
-def get_chat_history(user_id, db):
-    cache_key = f"summary:{user_id}"
-    cached_data = redis_client.get(cache_key)
+memory_manager = MemoryManager(
+    redis_client,
+    client,
+    Message,
+    ConversationSummary,
+)
 
-    if cached_data:
-        parsed = json.loads(cached_data)
-        summary_text = parsed["summary"]
-        covers_up_to = parsed["covers_up_to"]
-    else:
-        summary_record = db.query(ConversationSummary).filter(
-            ConversationSummary.user_id == str(user_id)
-        ).first()
+permission_checker = PermissionChecker()
 
-        if summary_record:
-            summary_text = summary_record.summary_text
-            covers_up_to = summary_record.covers_up_to_message_id
-
-            cache_value = json.dumps({
-                "summary": summary_text,
-                "covers_up_to": covers_up_to
-            })
-
-            redis_client.setex(cache_key, 300, cache_value)
-        else:
-            summary_text = None
-            covers_up_to = 0
-
-    if summary_text:
-        recent_rows = db.query(Message).filter(
-            Message.user_id == str(user_id),
-            Message.id > covers_up_to
-        ).order_by(Message.id).all()
-
-        chat_history = [
-            {
-                "role": "system",
-                "content": f"Summary of earlier conversation: {summary_text}"
-            }
-        ]
-
-        chat_history += [
-            {
-                "role": m.role,
-                "content": m.content
-            }
-            for m in recent_rows
-        ]
-    else:
-        all_rows = db.query(Message).filter(
-            Message.user_id == str(user_id)
-        ).order_by(Message.id).all()
-
-        chat_history = [
-            {
-                "role": m.role,
-                "content": m.content
-            }
-            for m in all_rows
-        ]
-
-    return chat_history
-
-
-def maybe_compress_history(user_id, db):
-    summary_record = db.query(ConversationSummary).filter(
-        ConversationSummary.user_id == str(user_id)
-    ).first()
-
-    covers_up_to = (
-        summary_record.covers_up_to_message_id
-        if summary_record
-        else 0
-    )
-
-    uncovered_rows = db.query(Message).filter(
-        Message.user_id == str(user_id),
-        Message.id > covers_up_to
-    ).order_by(Message.id).all()
-
-    if len(uncovered_rows) < COMPRESSION_THRESHOLD:
-        return
-
-    conversation_text = "\n".join(
-        [f"{m.role}: {m.content}" for m in uncovered_rows]
-    )
-
-    summary_response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[
-            {
-                "role": "system",
-                "content": "Summarize the following conversation concisely, preserving key facts and context."
-            },
-            {
-                "role": "user",
-                "content": conversation_text
-            }
-        ]
-    )
-
-    new_summary_text = summary_response.choices[0].message.content
-    new_covers_up_to = uncovered_rows[-1].id
-
-    if summary_record:
-        summary_record.summary_text = new_summary_text
-        summary_record.covers_up_to_message_id = new_covers_up_to
-    else:
-        new_record = ConversationSummary(
-            user_id=str(user_id),
-            summary_text=new_summary_text,
-            covers_up_to_message_id=new_covers_up_to
-        )
-
-        db.add(new_record)
-
-    db.commit()
-
-    redis_client.delete(f"summary:{user_id}")
+agent_loop = AgentLoop(
+    client,
+    tool_registry,
+    skill_registry,
+    permission_checker,
+)
 
 
 def get_db():
@@ -264,9 +177,10 @@ def verify_password(password, hashed):
     )
 
 
-def create_token(user_id):
+def create_token(user_id, role):
     payload = {
         "user_id": user_id,
+        "role": role,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)
     }
 
@@ -381,7 +295,7 @@ def login(
             detail="Invalid username or password"
         )
 
-    token = create_token(user.id)
+    token = create_token(user.id, user.role)
 
     return {
         "access_token": token
@@ -406,6 +320,16 @@ def chat(
     user_id: int = Depends(get_current_user),
     db=Depends(get_db)
 ):
+    user = db.query(User).filter(
+        User.id == user_id
+    ).first()
+
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found"
+        )
+
     user_message = Message(
         role="user",
         content=data.message,
@@ -415,36 +339,15 @@ def chat(
     db.add(user_message)
     db.commit()
 
-    chat_history = get_chat_history(
+    chat_history = memory_manager.get_chat_history(
         user_id,
         db
     )
 
-    if is_greeting(data.message):
-        context_text = "No reference material needed for this greeting."
-
-    else:
-        results = collection.query(
-            query_texts=[data.message],
-            n_results=3,
-            include=["documents", "distances"]
-        )
-
-        distances = results["distances"][0]
-        documents = results["documents"][0]
-
-        filtered_chunks = []
-
-        for i in range(len(documents)):
-            if distances[i] < 1.5:
-                filtered_chunks.append(documents[i])
-
-        context_text = (
-            "\n".join(filtered_chunks)
-            if filtered_chunks
-            else "No relevant reference material found."
-        )
-
+    context_text = (
+        "Reference material will be retrieved by the "
+        "knowledge_search skill when needed."
+    )
     chat_history.insert(
         0,
         {
@@ -456,7 +359,10 @@ def chat(
     )
 
     # Agent Loop
-    reply = agent_loop.run(chat_history)
+    reply = agent_loop.run(
+        chat_history,
+        role=user.role,
+    )
 
     assistant_message = Message(
         role="assistant",
@@ -467,7 +373,7 @@ def chat(
     db.add(assistant_message)
     db.commit()
 
-    maybe_compress_history(
+    memory_manager.maybe_compress_history(
         user_id,
         db
     )
@@ -475,6 +381,28 @@ def chat(
     return {
         "reply": reply
     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
