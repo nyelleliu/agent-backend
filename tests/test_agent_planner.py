@@ -9,9 +9,18 @@ class FakePlanner:
         assert user_request == "计算 100 + 20"
 
         return [
-            "理解计算任务",
-            "执行计算",
-            "返回结果",
+            {
+                "description": "理解计算任务",
+                "tools": [],
+            },
+            {
+                "description": "执行计算",
+                "tools": [],
+            },
+            {
+                "description": "返回结果",
+                "tools": [],
+            },
         ]
 
 
