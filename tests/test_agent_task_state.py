@@ -9,8 +9,14 @@ from app.tools.registry import ToolRegistry
 class FakePlanner:
     def create_plan(self, user_request):
         return [
-            "执行计算",
-            "完成任务",
+            {
+                "description": "执行计算",
+                "tools": ["calculate"],
+            },
+            {
+                "description": "完成任务",
+                "tools": [],
+            },
         ]
 
 

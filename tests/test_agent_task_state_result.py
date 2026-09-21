@@ -9,8 +9,14 @@ from app.tools.registry import ToolRegistry
 class FakePlanner:
     def create_plan(self, user_request):
         return [
-            "执行计算",
-            "完成任务",
+            {
+                "description": "执行计算",
+                "tools": ["calculate"],
+            },
+            {
+                "description": "完成任务",
+                "tools": [],
+            },
         ]
 
 
@@ -97,3 +103,46 @@ def test_agent_exposes_task_state():
 
     assert state.steps[0].status == "completed"
     assert state.steps[1].status == "pending"
+
+class OutOfOrderPlanner:
+    def create_plan(self, user_request):
+        return [
+            {
+                "description": "查询销售数据",
+                "tools": ["knowledge_search"],
+            },
+            {
+                "description": "执行计算",
+                "tools": ["calculate"],
+            },
+        ]
+
+
+def test_agent_matches_tool_to_correct_step():
+    client = FakeClient()
+
+    tools = ToolRegistry()
+    tools.register(CalculatorTool())
+
+    agent = AgentLoop(
+        client=client,
+        tool_registry=tools,
+        planner=OutOfOrderPlanner(),
+        task_state_class=TaskState,
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": "查询数据并计算",
+        }
+    ]
+
+    reply = agent.run(messages)
+
+    assert reply == "计算结果是 120"
+
+    state = agent.last_task_state
+
+    assert state.steps[0].status == "pending"
+    assert state.steps[1].status == "completed"

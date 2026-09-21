@@ -1,4 +1,4 @@
-﻿from typing import Any
+from typing import Any
 
 
 class AgentLoop:
@@ -46,7 +46,7 @@ class AgentLoop:
                         plan_text = task_state.as_text()
                     else:
                         plan_text = "\n".join(
-                            f"{i}. [pending] {step}"
+                            f"{i}. [pending] {step['description']}"
                             for i, step in enumerate(plan, start=1)
                         )
 
@@ -90,16 +90,16 @@ class AgentLoop:
             })
 
             for tc in msg.tool_calls:
+                name = tc.function.name
+                arguments = tc.function.arguments
+
                 current_index = None
 
                 if task_state is not None:
-                    current_index = self._current_step_index(task_state)
+                    current_index = task_state.find_step_by_tool(name)
 
                     if current_index is not None:
                         task_state.start_step(current_index)
-
-                name = tc.function.name
-                arguments = tc.function.arguments
 
                 if (
                     self.skill_registry is not None
@@ -176,14 +176,6 @@ class AgentLoop:
         )
 
         return result.startswith(error_prefixes)
-
-    @staticmethod
-    def _current_step_index(task_state) -> int | None:
-        for index, step in enumerate(task_state.steps):
-            if step.status == "pending":
-                return index
-
-        return None
 
     @staticmethod
     def _get_latest_user_message(

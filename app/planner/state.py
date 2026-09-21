@@ -4,14 +4,18 @@
 @dataclass
 class PlanStep:
     description: str
+    tools: list[str]
     status: str = "pending"
     retry_count: int = 0
 
 
 class TaskState:
-    def __init__(self, steps: list[str]):
+    def __init__(self, steps: list[dict]):
         self.steps = [
-            PlanStep(description=step)
+            PlanStep(
+                description=step["description"],
+                tools=step.get("tools", []),
+            )
             for step in steps
         ]
 
@@ -35,6 +39,16 @@ class TaskState:
 
         return None
 
+    def find_step_by_tool(self, tool_name: str) -> int | None:
+        for index, step in enumerate(self.steps):
+            if (
+                step.status == "pending"
+                and tool_name in step.tools
+            ):
+                return index
+
+        return None
+
     def is_completed(self) -> bool:
         return all(
             step.status == "completed"
@@ -44,6 +58,7 @@ class TaskState:
     def as_text(self) -> str:
         return "\n".join(
             f"{i}. [{step.status}] {step.description} "
+            f"tools={step.tools} "
             f"(retries: {step.retry_count})"
             for i, step in enumerate(self.steps, start=1)
         )

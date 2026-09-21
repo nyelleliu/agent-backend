@@ -12,6 +12,8 @@ import datetime
 import chromadb
 from app.tools import tool_registry
 from app.agent.loop import AgentLoop
+from app.planner.planner import Planner
+from app.planner.state import TaskState
 from app.permissions.checker import PermissionChecker
 from app.skills import skill_registry
 from app.skills.knowledge import KnowledgeSearchSkill
@@ -39,13 +41,6 @@ client = OpenAI(
 
 permission_checker = PermissionChecker()
 
-agent_loop = AgentLoop(
-    client,
-    tool_registry,
-    skill_registry,
-    permission_checker,
-)
-
 
 chroma_client = chromadb.PersistentClient(path="./chroma_data")
 collection = chroma_client.get_or_create_collection(name="my_docs")
@@ -54,6 +49,21 @@ skill_registry.register(KnowledgeSearchSkill(collection, tool_registry))
 
 skill_registry.register(
     DataAnalysisSkill(tool_registry)
+)
+
+planner = Planner(
+    client=client,
+    tool_registry=tool_registry,
+    skill_registry=skill_registry,
+)
+
+agent_loop = AgentLoop(
+    client=client,
+    tool_registry=tool_registry,
+    skill_registry=skill_registry,
+    permission_checker=permission_checker,
+    planner=planner,
+    task_state_class=TaskState,
 )
 
 redis_client = redis.Redis(
@@ -111,14 +121,6 @@ memory_manager = MemoryManager(
     ConversationSummary,
 )
 
-permission_checker = PermissionChecker()
-
-agent_loop = AgentLoop(
-    client,
-    tool_registry,
-    skill_registry,
-    permission_checker,
-)
 
 
 def get_db():
