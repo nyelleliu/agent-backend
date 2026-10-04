@@ -2,98 +2,303 @@
 
 企业内部智能查询 Agent 后端项目。
 
-项目目标：构建一个具备 Tool Calling、Skill、RAG、Memory、Planner、权限控制和任务恢复能力的企业级 Agent。
+项目目标：构建一个具备 **Tool Calling、Skill、RAG、Memory、MCP、权限控制、多用户隔离**能力的企业级 Agent 后端，并通过实际工程代码学习 Agent 的核心架构。
 
-## 当前架构
+> 当前状态：核心 Agent 能力已经基本搭建完成，当前全量测试 **58 passed**。下一阶段重点是把 Planner / TaskState 完整接入 AgentLoop，并完善 RAG 文档级权限过滤。
+
+---
+
+## 1. 项目架构
 
 ```text
-User
- ↓
-FastAPI
- ↓
-AgentLoop
- ├── Planner
- ├── TaskState
- ├── Tool Registry
- ├── Skill Registry
- ├── Permission Checker
- └── Retry / Recovery
-      ↓
-   Tool / Skill
-      ↓
-   Result / Error
-      ↓
-   LLM
+                         User
+                           │
+                           ▼
+                        FastAPI
+                           │
+                           ▼
+                      AgentLoop
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+          ▼                ▼                ▼
+       Planner         Skill Registry    MCP Registry
+          │                │                │
+       TaskState           │                │
+          │                ▼                ▼
+          │             Tool Registry    MCP Adapter
+          │                │                │
+          └────────────────┼────────────────┘
+                           │
+                           ▼
+                  Permission Checker
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+             Tool         Skill         MCP
+              │            │            │
+              └────────────┼────────────┘
+                           ▼
+                          LLM
+                           │
+                           ▼
+                         Memory
+                           │
+                  ┌────────┴────────┐
+                  ▼                 ▼
+                MySQL             Redis
 ```
 
-## 已完成
+---
+
+## 2. 已完成模块
 
 ### Agent Core
+
 - Agent Loop
 - 多轮 Tool Calling
 - Tool Registry
 - Skill Registry
-- Planner
-- Task State
-- Retry / Recovery
-- Tool Error Feedback
+- Tool 参数处理
+- Tool 错误反馈
+- Retry / Recovery 基础能力
+- Permission Checker
+- Task State / Planner 基础代码
 
 ### Tools
+
+当前已经接入：
+
 - Calculator
 - Current Time
-- Tool 参数校验
-- Tool 统一注册与执行
+- Tool 统一注册
+- Tool schema
+- Tool 参数处理与执行
 
 ### Skills
+
+当前主要 Skill：
+
 - Knowledge Search
 - Data Analysis
-- Skill 权限控制
 
-### RAG
-- Chroma 向量数据库
-- 文档切分
-- Embedding 检索
-- Top-K 查询
-- Distance Threshold 过滤
+Skill 可以通过统一 Registry 被 Agent 调用，并受到角色权限控制。
 
-> RAG 文档级权限过滤尚未实现。
+---
 
-### Memory
-- MySQL 保存对话
-- Redis 缓存 Summary
-- 长对话自动压缩
+## 3. 权限系统
+
+项目采用统一的 `PermissionChecker` 管理角色权限和文档权限。
+
+### Role → Skill
+
+```text
+employee
+├── knowledge_search
+├── calculate
+└── get_current_time
+
+finance
+├── knowledge_search
+├── calculate
+├── get_current_time
+└── data_analysis
+
+admin
+├── knowledge_search
+├── calculate
+├── get_current_time
+└── data_analysis
+```
+
+### Document Permission
+
+```text
+public
+employee
+finance
+admin
+```
+
+文档上传权限已经统一使用：
+
+```text
+PermissionChecker.DOCUMENT_PERMISSIONS
+```
+
+避免 Knowledge Search 和 Upload Document 各自维护重复权限规则。
+
+同时已经增加非法文档权限校验，例如：
+
+```text
+permission = "invalid"
+        ↓
+拒绝
+```
+
+---
+
+## 4. RAG
+
+当前已经实现基础 RAG 检索链路：
+
+```text
+Document
+   ↓
+Chunk
+   ↓
+Embedding
+   ↓
+Chroma
+   ↓
+Vector Search
+   ↓
+Top-K
+   ↓
+Distance Threshold
+   ↓
+Context
+   ↓
+LLM
+```
+
+当前检索配置：
+
+```python
+n_results = 3
+```
+
+并使用距离阈值过滤低相关结果。
+
+### 当前状态
+
+```text
+文档切分              ✅
+Embedding             ✅
+Chroma                ✅
+Vector Search         ✅
+Top-K                 ✅
+Distance Filtering    ✅
+文档上传权限          ✅
+RAG 文档级检索权限    ⏳
+Rerank                ⏳
+```
+
+下一阶段会让检索结果严格遵守用户角色对应的文档权限。
+
+---
+
+## 5. MCP
+
+已经完成 Agent 与 MCP 的基础集成。
+
+当前架构：
+
+```text
+AgentLoop
+    ↓
+MCPToolRegistry
+    ↓
+MCPToolAdapter
+    ↓
+MCPClient
+    ↓
+Thread
+    ↓
+Event Loop
+    ↓
+MCP Server
+```
+
+MCP Client 已处理：
+
+- MCP Server 启动
+- 独立 Thread
+- Async Event Loop
+- `ClientSession`
+- `initialize()`
+- `list_tools()`
+- `call_tool()`
+- Session 生命周期管理
+
+MCP Tool 会通过 Adapter 转换成 AgentLoop 可以统一调用的 Tool。
+
+---
+
+## 6. Memory
+
+已经实现持久化对话 Memory。
+
+当前包括：
+
+- 多轮对话历史
 - Conversation Summary
+- 长对话自动压缩
+- 数据库保存 Summary
+- Redis Summary Cache
 
-### Authentication
-- 注册 / 登录
+基本流程：
+
+```text
+Conversation
+     ↓
+History
+     ↓
+达到压缩阈值
+     ↓
+Summary
+     ↓
+ConversationSummary
+     ↓
+Redis Cache
+```
+
+Redis Summary Key：
+
+```text
+summary:{user_id}
+```
+
+并设置 TTL。
+
+---
+
+## 7. 多用户隔离
+
+项目支持基于 `user_id` 的用户数据隔离。
+
+主要应用于：
+
+- Conversation History
+- Memory Summary
+- Redis Cache
+
+目标是让不同用户之间的 Agent 上下文和历史数据相互隔离。
+
+---
+
+## 8. Authentication
+
+项目已经包含基础用户认证能力：
+
+- 注册
+- 登录
 - bcrypt 密码哈希
 - JWT
 - 用户角色
 
-### Planner / Recovery
+主要 API：
 
 ```text
-用户任务
- ↓
-Planner
- ↓
-TaskState
- ↓
-执行 Tool / Skill
- ↓
-成功 → completed
-失败 → failed
-       ↓
-     retry
-       ↓
-    pending
-       ↓
-   再次执行
+POST /register
+POST /login
 ```
 
-Tool 失败时会将错误原因反馈给 LLM，使 Agent 能根据错误决定后续操作。
+---
 
-## API
+## 9. API
+
+当前主要 API：
 
 ```text
 POST /register
@@ -102,7 +307,161 @@ POST /upload_doc
 POST /chat
 ```
 
-## 技术栈
+---
+
+## 10. 测试
+
+当前全量测试：
+
+```text
+58 passed
+```
+
+测试覆盖主要包括：
+
+- Tools
+- Tool Registry
+- Agent Loop
+- Skills
+- Permission
+- Document Upload Permission
+- Memory
+- MCP
+- RAG
+- Planner / Task State 相关基础能力
+- Retry / Recovery
+- Error Handling
+
+每次重要功能修改后都会执行完整 pytest，确保已有 Agent 能力没有被破坏。
+
+---
+
+## 11. 当前项目状态
+
+```text
+Tool Registry              ✅
+Skill Registry             ✅
+Agent Loop                 ✅
+Tool Calling               ✅
+Role → Skill Permission    ✅
+Document Upload Permission ✅
+RAG 基础检索               ✅
+Memory                     ✅
+Redis                      ✅
+Multi-user                 ✅
+Authentication             ✅
+MCP 基础集成               ✅
+pytest                     ✅ 58 passed
+
+Planner 完整接入           🚧
+TaskState 完整接入         🚧
+Planner → Tool/Skill       🚧
+RAG 文档级检索权限         🚧
+Agent + Memory 深度结合    🚧
+MCP 高级能力               ⏳
+Evaluation                 ⏳
+Observability              ⏳
+Docker 部署                ⏳
+```
+
+---
+
+## 12. 下一阶段路线
+
+### Phase 1：完善 Planner
+
+将 Planner 和 TaskState 真正接入 AgentLoop：
+
+```text
+User Task
+   ↓
+Planner
+   ↓
+TaskState
+   ↓
+Step 1
+   ↓
+Tool / Skill
+   ↓
+Result
+   ↓
+TaskState Update
+   ↓
+Step 2
+   ↓
+...
+   ↓
+Final Answer
+```
+
+重点：
+
+- Planner 真正参与 Agent 执行
+- TaskState 记录任务状态
+- Step 与 Tool / Skill 对应
+- 支持任务成功 / 失败 / 重试
+- 增加完整集成测试
+
+### Phase 2：完善 RAG 权限
+
+实现：
+
+```text
+employee
+    ↓
+public + employee
+
+finance
+    ↓
+public + employee + finance
+
+admin
+    ↓
+全部
+```
+
+使用户不仅在上传文档时受到权限控制，在**检索阶段也受到文档权限控制**。
+
+### Phase 3：Agent + Memory
+
+进一步让 Memory 深度进入 Agent：
+
+```text
+User
+ ↓
+Memory
+ ↓
+Agent
+ ↓
+Tool / Skill / RAG / MCP
+ ↓
+Result
+ ↓
+Memory
+```
+
+### Phase 4：MCP 高级能力
+
+继续完善：
+
+- 动态 Tool Discovery
+- MCP Tool 生命周期
+- 多 MCP Server
+- Agent 动态扩展外部工具
+
+### Phase 5：工程化
+
+后续继续加入：
+
+- Agent Evaluation
+- Logging / Observability
+- Docker
+- 部署
+- 更完整的集成测试
+
+---
+
+## 13. 技术栈
 
 - Python
 - FastAPI
@@ -114,65 +473,27 @@ POST /chat
 - JWT
 - bcrypt
 - pytest
+- MCP
 
-## 测试
+---
 
-当前测试：
-
-```text
-39 passed
-```
-
-测试覆盖：
-
-- Tools
-- Tool Registry
-- Agent Loop
-- Skills
-- 权限
-- Memory
-- Planner
-- TaskState
-- Agent Planner Integration
-- Retry / Recovery
-- Error Feedback
-
-## 项目路线
-
-```text
-Tool Registry        ✅
-Agent Loop           ✅
-Skill Registry       ✅
-Role → Skill 权限    ✅
-Memory               ✅
-多轮 Tool Call       ✅
-Planner              ✅
-Task State           ✅
-Retry / Recovery     ✅
-Error Feedback       ✅
-测试                  ✅
-
-RAG 文档级权限过滤   ⏳
-MCP                   ⏳
-Multi-Agent           ⏳
-Evaluation            ⏳
-Logging               ⏳
-Docker                ⏳
-```
-
-## 后续目标
-
-1. MCP
-2. RAG 文档级权限过滤
-3. Multi-Agent
-4. Agent Evaluation
-5. Logging / Observability
-6. Docker 部署
-
-## 项目定位
+## 14. 项目定位
 
 最终目标：
 
-> 企业级 AI Agent 助手：能够查询企业知识、调用业务工具、分析数据，并根据用户权限完成多步骤任务。
+> 构建一个面向企业内部场景的 AI Agent 后端，能够根据用户权限访问企业知识库、调用工具、分析数据、使用外部 MCP 工具，并通过 Memory 支持持续的多轮任务。
 
-本项目同时用于学习 Agent 原理、Agent Framework 架构以及企业级 Agent 后端工程实践。
+本项目同时用于系统学习：
+
+- Agent Loop
+- Tool Calling
+- Skill Architecture
+- Planner
+- Task State
+- RAG
+- Memory
+- MCP
+- Permission System
+- Agent Backend Engineering
+
+项目重点不是简单调用 LLM API，而是理解并实现一个 **可扩展、可测试、具有权限控制和工具编排能力的 Agent 后端架构**。

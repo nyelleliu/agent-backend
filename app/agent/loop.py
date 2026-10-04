@@ -1,4 +1,4 @@
-from typing import Any
+﻿from typing import Any
 
 
 class AgentLoop:
@@ -10,6 +10,7 @@ class AgentLoop:
         permission_checker=None,
         planner=None,
         task_state_class=None,
+        mcp_tool_registry=None,
         max_steps: int = 5,
         max_retries: int = 2,
     ):
@@ -19,6 +20,7 @@ class AgentLoop:
         self.permission_checker = permission_checker
         self.planner = planner
         self.task_state_class = task_state_class
+        self.mcp_tool_registry = mcp_tool_registry
         self.max_steps = max_steps
         self.max_retries = max_retries
         self.last_task_state = None
@@ -68,6 +70,9 @@ class AgentLoop:
 
             if self.skill_registry is not None:
                 capabilities += self.skill_registry.schemas()
+
+            if self.mcp_tool_registry is not None:
+                capabilities += self.mcp_tool_registry.schemas()
 
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
@@ -126,6 +131,20 @@ class AgentLoop:
                             )
                         except Exception as exc:
                             result = f"Error: {exc}"
+
+                elif (
+                    self.mcp_tool_registry is not None
+                    and self.mcp_tool_registry.get(name) is not None
+                ):
+                    try:
+                        mcp_arguments = self._parse_arguments(arguments)
+
+                        result = self.mcp_tool_registry.execute(
+                            name,
+                            mcp_arguments,
+                        )
+                    except Exception as exc:
+                        result = f"Error: {exc}"
 
                 else:
                     result = self.tool_registry.execute(
@@ -205,4 +224,5 @@ class AgentLoop:
             raise ValueError("tool arguments must be a JSON object")
 
         return result
+
 

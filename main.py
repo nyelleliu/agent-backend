@@ -1,5 +1,6 @@
 ﻿import os
 import json
+import uuid
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -7,6 +8,7 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+from typing import Literal
 from openai import OpenAI
 import datetime
 import chromadb
@@ -19,6 +21,8 @@ from app.skills import skill_registry
 from app.skills.knowledge import KnowledgeSearchSkill
 from app.skills.data_analysis import DataAnalysisSkill
 from app.memory.manager import MemoryManager
+from app.mcp.client import MCPClient
+from app.mcp.tool_registry import MCPToolRegistry
 import bcrypt
 import jwt
 import redis
@@ -51,10 +55,15 @@ skill_registry.register(
     DataAnalysisSkill(tool_registry)
 )
 
+mcp_client = MCPClient()
+mcp_tool_registry = MCPToolRegistry(mcp_client)
+mcp_tool_registry.refresh()
+
 planner = Planner(
     client=client,
     tool_registry=tool_registry,
     skill_registry=skill_registry,
+    mcp_tool_registry=mcp_tool_registry,
 )
 
 agent_loop = AgentLoop(
@@ -64,6 +73,7 @@ agent_loop = AgentLoop(
     permission_checker=permission_checker,
     planner=planner,
     task_state_class=TaskState,
+    mcp_tool_registry=mcp_tool_registry,
 )
 
 redis_client = redis.Redis(
@@ -133,7 +143,7 @@ def get_db():
 
 
 def is_greeting(message):
-    greetings = ["你好", "hi", "hello", "嗨", "早上好", "晚上好", "在吗"]
+    greetings = ["你好", "hi", "hello", "您好", "嗨", "哈喽", "早上好"]
     return any(g in message.lower() for g in greetings)
 
 
@@ -149,13 +159,19 @@ def split_text(text, chunk_size=300):
     return chunks
 
 
-def add_document(text):
+def add_document(text, permission):
     chunks = split_text(text)
-    ids = [f"chunk_{i}" for i in range(len(chunks))]
+    ids = [f"chunk_{uuid.uuid4()}" for _ in chunks]
+
+    metadatas = [
+        {"permission": permission}
+        for _ in chunks
+    ]
 
     collection.add(
         documents=chunks,
-        ids=ids
+        ids=ids,
+        metadatas=metadatas
     )
 
 
@@ -224,7 +240,10 @@ def get_current_user(
     token = credentials.credentials
     payload = decode_token(token)
 
-    return payload["user_id"]
+    return {
+        "user_id": payload["user_id"],
+        "role": payload["role"],
+    }
 
 
 class ChatMessage(BaseModel):
@@ -233,6 +252,7 @@ class ChatMessage(BaseModel):
 
 class DocumentUpload(BaseModel):
     text: str
+    permission: Literal["public", "employee", "finance", "admin"]
 
 
 class UserRegister(BaseModel):
@@ -307,9 +327,20 @@ def login(
 @app.post("/upload_doc")
 def upload_doc(
     data: DocumentUpload,
-    user_id: int = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ):
-    add_document(data.text)
+    role = current_user["role"]
+
+    if not permission_checker.can_upload_document(
+        role,
+        data.permission,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have permission to upload this document level"
+        )
+
+    add_document(data.text, data.permission)
 
     return {
         "message": "Document stored"
@@ -383,6 +414,8 @@ def chat(
     return {
         "reply": reply
     }
+
+
 
 
 

@@ -117,6 +117,7 @@ class FakeSummary:
 class FakeLLM:
     def __init__(self):
         self.called = False
+        self.last_prompt = None
 
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(
@@ -126,6 +127,7 @@ class FakeLLM:
 
     def create(self, **kwargs):
         self.called = True
+        self.last_prompt = kwargs["messages"][1]["content"]
 
         return SimpleNamespace(
             choices=[
@@ -209,3 +211,30 @@ def test_compress_history_when_threshold_reached():
     assert db.summary is not None
     assert db.summary.summary_text == "新的对话摘要"
     assert db.summary.covers_up_to_message_id == 20
+
+
+def test_compress_history_includes_previous_summary():
+    messages = [
+        FakeMessage(i, "user", f"message {i}")
+        for i in range(3, 23)
+    ]
+
+    old_summary = FakeSummary(
+        summary_text="\u7528\u6237\u4e4b\u524d\u5df2\u7ecf\u5b8c\u6210\u4e86 MCP \u63a5\u5165\u3002",
+        covers_up_to_message_id=2,
+    )
+
+    llm = FakeLLM()
+    db = FakeDB(messages, old_summary)
+    manager = create_manager(llm)
+
+    manager.maybe_compress_history(
+        user_id=1,
+        db=db,
+        threshold=20,
+    )
+
+    assert llm.called is True
+    assert "\u7528\u6237\u4e4b\u524d\u5df2\u7ecf\u5b8c\u6210\u4e86 MCP \u63a5\u5165\u3002" in llm.last_prompt
+    assert "message 3" in llm.last_prompt
+    assert "message 22" in llm.last_prompt

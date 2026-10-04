@@ -8,10 +8,12 @@ class Planner:
         client,
         tool_registry=None,
         skill_registry=None,
+        mcp_tool_registry=None,
     ):
         self.client = client
         self.tool_registry = tool_registry
         self.skill_registry = skill_registry
+        self.mcp_tool_registry = mcp_tool_registry
 
     def _get_capabilities(self) -> list[dict[str, Any]]:
         capabilities = []
@@ -34,6 +36,16 @@ class Planner:
                     "name": function["name"],
                     "description": function["description"],
                     "type": "skill",
+                })
+
+        if self.mcp_tool_registry is not None:
+            for schema in self.mcp_tool_registry.schemas():
+                function = schema["function"]
+
+                capabilities.append({
+                    "name": function["name"],
+                    "description": function["description"],
+                    "type": "mcp_tool",
                 })
 
         return capabilities

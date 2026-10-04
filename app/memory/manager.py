@@ -103,10 +103,21 @@ class MemoryManager:
         if len(uncovered_rows) < threshold:
             return
 
-        conversation_text = "\n".join(
-            f"{message.role}: {message.content}"
-            for message in uncovered_rows
+        parts = []
+
+        if summary_record:
+            parts.append(
+                f"Previous summary:\n{summary_record.summary_text}"
+            )
+
+        parts.append(
+            "\n".join(
+                f"{message.role}: {message.content}"
+                for message in uncovered_rows
+            )
         )
+
+        conversation_text = "\n\n".join(parts)
 
         response = self.llm_client.chat.completions.create(
             model="deepseek-chat",

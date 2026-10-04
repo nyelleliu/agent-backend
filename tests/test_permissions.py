@@ -49,3 +49,56 @@ def test_unknown_role_has_no_permission():
         "unknown",
         "data_analysis",
     )
+
+def test_employee_can_upload_public_document():
+    checker = PermissionChecker()
+
+    assert checker.can_upload_document(
+        "employee",
+        "public",
+    )
+
+
+def test_employee_can_upload_employee_document():
+    checker = PermissionChecker()
+
+    assert checker.can_upload_document(
+        "employee",
+        "employee",
+    )
+
+
+def test_employee_cannot_upload_finance_document():
+    checker = PermissionChecker()
+
+    assert not checker.can_upload_document(
+        "employee",
+        "finance",
+    )
+
+
+def test_employee_cannot_upload_admin_document():
+    checker = PermissionChecker()
+
+    assert not checker.can_upload_document(
+        "employee",
+        "admin",
+    )
+
+
+def test_finance_can_upload_finance_document():
+    checker = PermissionChecker()
+
+    assert checker.can_upload_document(
+        "finance",
+        "finance",
+    )
+
+
+def test_admin_can_upload_admin_document():
+    checker = PermissionChecker()
+
+    assert checker.can_upload_document(
+        "admin",
+        "admin",
+    )
