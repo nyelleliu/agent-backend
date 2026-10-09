@@ -1,0 +1,16 @@
+fastapi==0.141.1
+uvicorn==0.52.4
+pydantic==2.12.5
+openai==2.29.0
+chromadb==1.5.9
+SQLAlchemy==2.0.48
+PyMySQL==1.2.0
+redis==8.1.0
+bcrypt==5.0.0
+PyJWT==2.14.0
+python-dotenv==1.2.2
+mcp==2.2.0
+
+# tests
+httpx==0.28.1
+pytest==9.1.1

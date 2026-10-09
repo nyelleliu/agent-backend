@@ -8,6 +8,30 @@
 
 ---
 
+## 0. 快速开始
+
+```bash
+pip install -r requirements.txt
+```
+
+`.env` 必需配置：
+
+```text
+DEEPSEEK_API_KEY=...
+MYSQL_PASSWORD=...
+JWT_SECRET_KEY=...
+LOG_LEVEL=INFO
+```
+
+依赖服务：MySQL（库名 `agent_db`，需自建 `users` / `messages` / `conversation_summaries` 三张表）、Redis、DeepSeek API。
+
+```bash
+uvicorn main:app --reload
+pytest -q
+```
+
+---
+
 ## 1. 项目架构
 
 ```text
