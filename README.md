@@ -4,7 +4,7 @@
 
 项目目标：构建一个具备 **Tool Calling、Skill、RAG、Memory、MCP、权限控制、多用户隔离**能力的企业级 Agent 后端，并通过实际工程代码学习 Agent 的核心架构。
 
-> 当前状态：核心 Agent 能力已经基本搭建完成，当前全量测试 **58 passed**。下一阶段重点是把 Planner / TaskState 完整接入 AgentLoop，并完善 RAG 文档级权限过滤。
+> 当前状态：核心 Agent 能力已经基本搭建完成，RAG 检索链路已升级为「智能切分 → 结构化元数据 → 混合召回 → 重排 → 带引用回答」，当前全量测试 **105 passed**。下一阶段重点是把 Planner / TaskState 完整接入 AgentLoop。
 
 ---
 
@@ -140,51 +140,76 @@ permission = "invalid"
 
 ## 4. RAG
 
-当前已经实现基础 RAG 检索链路：
+RAG 检索链路位于 `app/rag/`：
 
 ```text
 Document
-   ↓
+   ↓  TextChunker（标题/段落/句子切分 + overlap）
 Chunk
-   ↓
-Embedding
-   ↓
+   ↓  ingest_document（结构化元数据）
 Chroma
    ↓
-Vector Search
+Vector Query ──┐   Keyword Query（$contains / $or）
+   ↓           │      ↓
+ distance 阈值 │      词命中率打分
+   └───── 合并去重 ─────┘
    ↓
-Top-K
+ Reranker（启发式 / 可选 LLM）
    ↓
-Distance Threshold
+ Top-K 编号片段
    ↓
-Context
-   ↓
-LLM
+ LLM 按 [N] 引用作答
 ```
 
-当前检索配置：
+### 切分与元数据
 
 ```python
-n_results = 3
+TextChunker(chunk_size=500, overlap=80)
 ```
 
-并使用距离阈值过滤低相关结果。
+- 先按 Markdown 标题 / 空行分段，再按中英文句子切分，超长段落硬切并保留重叠
+- 每个 chunk 保存 `permission`、`title`、`doc_id`、`chunk_index`、`source`、`uploaded_by`、`created_at`
+- chunk id 形如 `{doc_id}:{index}`，支持按文档删除与重建
+
+### 召回配置
+
+```python
+n_results = 10            # 候选集，交给重排
+distance_threshold = 1.5  # 向量腿低相关过滤
+keyword_limit = 8         # 关键词腿最多 8 个词（中文取 2-gram）
+top_k = 3                 # 重排后进入 LLM 的片段数
+```
+
+两路结果按 id 合并去重，双路命中会额外加分。
+
+### 重排与引用
+
+- 默认 `HeuristicReranker`：词面重合 + 标题加权 + 原始召回分，本地零成本
+- 可选 `LLMReranker`：用 DeepSeek 给候选排序，失败自动回退启发式
+- `knowledge_search` 返回编号片段：
+
+```text
+[1] 差旅报销标准 (permission=employee, score=0.61)
+...
+```
+
+System Prompt 会要求模型按 `[N]` 标注出处。
 
 ### 当前状态
 
 ```text
-文档切分              ✅
+文档切分              ✅ 标题/段落/句子 + overlap
+结构化元数据          ✅
 Embedding             ✅
 Chroma                ✅
-Vector Search         ✅
+向量 + 关键词混合召回 ✅
 Top-K                 ✅
 Distance Filtering    ✅
 文档上传权限          ✅
-RAG 文档级检索权限    ⏳
-Rerank                ⏳
+RAG 文档级检索权限    ✅
+重排                  ✅ 启发式 / 可选 LLM
+答案引用来源          ✅
 ```
-
-下一阶段会让检索结果严格遵守用户角色对应的文档权限。
 
 ---
 
@@ -314,7 +339,7 @@ POST /chat
 当前全量测试：
 
 ```text
-58 passed
+105 passed
 ```
 
 测试覆盖主要包括：
@@ -327,7 +352,8 @@ POST /chat
 - Document Upload Permission
 - Memory
 - MCP
-- RAG
+- RAG Chunker / Ingest / Retriever / Reranker
+- Knowledge Search 引用与权限
 - Planner / Task State 相关基础能力
 - Retry / Recovery
 - Error Handling
@@ -345,18 +371,20 @@ Agent Loop                 ✅
 Tool Calling               ✅
 Role → Skill Permission    ✅
 Document Upload Permission ✅
-RAG 基础检索               ✅
+RAG 智能切分 + 元数据      ✅
+RAG 混合召回               ✅
+RAG 重排 + 引用来源        ✅
+RAG 文档级检索权限         ✅
 Memory                     ✅
 Redis                      ✅
 Multi-user                 ✅
 Authentication             ✅
 MCP 基础集成               ✅
-pytest                     ✅ 58 passed
+pytest                     ✅ 105 passed
 
 Planner 完整接入           🚧
 TaskState 完整接入         🚧
 Planner → Tool/Skill       🚧
-RAG 文档级检索权限         🚧
 Agent + Memory 深度结合    🚧
 MCP 高级能力               ⏳
 Evaluation                 ⏳
@@ -402,9 +430,15 @@ Final Answer
 - 支持任务成功 / 失败 / 重试
 - 增加完整集成测试
 
-### Phase 2：完善 RAG 权限
+### Phase 2：RAG 质量（已完成）
 
-实现：
+已完成：
+
+- 检索阶段的文档权限过滤
+- 智能切分（标题 / 段落 / 句子 + overlap）与结构化元数据
+- 向量 + 关键词混合召回与去重融合
+- 启发式重排，可切换 LLM 重排
+- 带编号引用的回答与 Prompt 约束
 
 ```text
 employee
@@ -420,7 +454,11 @@ admin
 全部
 ```
 
-使用户不仅在上传文档时受到权限控制，在**检索阶段也受到文档权限控制**。
+后续可继续：
+
+- 接入 Cross-Encoder 或专用 Embedding Rerank 模型
+- 中文关键词召回升级为 BM25
+- RAG 检索质量评测集
 
 ### Phase 3：Agent + Memory
 

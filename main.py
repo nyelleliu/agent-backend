@@ -1,9 +1,12 @@
-﻿import os
-import json
-import uuid
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
+from app.core.logging_config import setup_logging
+
+setup_logging()
+
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -20,6 +23,8 @@ from app.permissions.checker import PermissionChecker
 from app.skills import skill_registry
 from app.skills.knowledge import KnowledgeSearchSkill
 from app.skills.data_analysis import DataAnalysisSkill
+from app.rag.chunker import TextChunker
+from app.rag.ingest import ingest_document
 from app.memory.manager import MemoryManager
 from app.mcp.client import MCPClient
 from app.mcp.tool_registry import MCPToolRegistry
@@ -147,31 +152,23 @@ def is_greeting(message):
     return any(g in message.lower() for g in greetings)
 
 
-def split_text(text, chunk_size=300):
-    chunks = []
-    start = 0
-
-    while start < len(text):
-        chunk = text[start:start + chunk_size]
-        chunks.append(chunk)
-        start += chunk_size
-
-    return chunks
-
-
-def add_document(text, permission):
-    chunks = split_text(text)
-    ids = [f"chunk_{uuid.uuid4()}" for _ in chunks]
-
-    metadatas = [
-        {"permission": permission}
-        for _ in chunks
+def split_text(text, chunk_size=300, overlap=80):
+    return [
+        chunk.text
+        for chunk in TextChunker(
+            chunk_size=chunk_size,
+            overlap=overlap,
+        ).split(text)
     ]
 
-    collection.add(
-        documents=chunks,
-        ids=ids,
-        metadatas=metadatas
+
+def add_document(text, permission, title=None, uploaded_by=None):
+    return ingest_document(
+        collection,
+        text,
+        permission=permission,
+        title=title,
+        uploaded_by=uploaded_by,
     )
 
 
@@ -253,6 +250,7 @@ class ChatMessage(BaseModel):
 class DocumentUpload(BaseModel):
     text: str
     permission: Literal["public", "employee", "finance", "admin"]
+    title: str | None = None
 
 
 class UserRegister(BaseModel):
@@ -340,7 +338,18 @@ def upload_doc(
             detail="You do not have permission to upload this document level"
         )
 
-    add_document(data.text, data.permission)
+    try:
+        add_document(
+            data.text,
+            data.permission,
+            title=data.title,
+            uploaded_by=current_user["user_id"],
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
 
     return {
         "message": "Document stored"

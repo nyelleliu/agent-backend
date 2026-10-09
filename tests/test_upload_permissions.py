@@ -34,9 +34,11 @@ def test_employee_can_upload_employee_document(monkeypatch):
 
     called = {}
 
-    def fake_add_document(text, permission):
+    def fake_add_document(text, permission, title=None, uploaded_by=None):
         called["text"] = text
         called["permission"] = permission
+        called["title"] = title
+        called["uploaded_by"] = uploaded_by
 
     monkeypatch.setattr(main, "add_document", fake_add_document)
 
@@ -60,9 +62,11 @@ def test_finance_can_upload_finance_document(monkeypatch):
 
     called = {}
 
-    def fake_add_document(text, permission):
+    def fake_add_document(text, permission, title=None, uploaded_by=None):
         called["text"] = text
         called["permission"] = permission
+        called["title"] = title
+        called["uploaded_by"] = uploaded_by
 
     monkeypatch.setattr(main, "add_document", fake_add_document)
 
@@ -86,9 +90,11 @@ def test_admin_can_upload_admin_document(monkeypatch):
 
     called = {}
 
-    def fake_add_document(text, permission):
+    def fake_add_document(text, permission, title=None, uploaded_by=None):
         called["text"] = text
         called["permission"] = permission
+        called["title"] = title
+        called["uploaded_by"] = uploaded_by
 
     monkeypatch.setattr(main, "add_document", fake_add_document)
 

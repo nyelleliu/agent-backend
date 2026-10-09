@@ -1,6 +1,8 @@
 from typing import Any
 
 from app.permissions.checker import PermissionChecker
+from app.rag.reranker import HeuristicReranker, Reranker
+from app.rag.retriever import Retriever
 from app.skills.base import Skill
 
 
@@ -20,10 +22,26 @@ class KnowledgeSearchSkill(Skill):
         "required": ["query"],
     }
 
-    def __init__(self, collection, tool_registry):
+    def __init__(
+        self,
+        collection,
+        tool_registry,
+        retriever: Retriever | None = None,
+        reranker: Reranker | None = None,
+        permission_checker: PermissionChecker | None = None,
+        candidate_k: int = 10,
+        top_k: int = 3,
+    ):
         self.collection = collection
         self.tool_registry = tool_registry
-        self.permission_checker = PermissionChecker()
+        self.permission_checker = permission_checker or PermissionChecker()
+        self.retriever = retriever or Retriever(
+            collection,
+            n_results=candidate_k,
+        )
+        self.reranker = reranker or HeuristicReranker()
+        self.candidate_k = candidate_k
+        self.top_k = top_k
 
     def run(self, arguments: dict[str, Any]) -> str:
         query = arguments.get("query", "")
@@ -37,27 +55,35 @@ class KnowledgeSearchSkill(Skill):
             {"public"},
         )
 
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=3,
-            where={
-                "permission": {
-                    "$in": list(allowed_permissions)
-                }
-            },
-            include=["documents", "distances"],
+        candidates = self.retriever.retrieve(
+            query,
+            allowed_permissions,
+            top_k=self.candidate_k,
+        )
+        ranked = self.reranker.rerank(
+            query,
+            candidates,
+            top_k=self.top_k,
         )
 
-        distances = results["distances"][0]
-        documents = results["documents"][0]
-
-        filtered_chunks = []
-
-        for i in range(len(documents)):
-            if distances[i] < 1.5:
-                filtered_chunks.append(documents[i])
-
-        if not filtered_chunks:
+        if not ranked:
             return "No relevant reference material found."
 
-        return "\n".join(filtered_chunks)
+        return self._format(ranked)
+
+    @staticmethod
+    def _format(chunks) -> str:
+        blocks = []
+
+        for index, chunk in enumerate(chunks, start=1):
+            metadata = chunk.metadata or {}
+            title = metadata.get("title") or "Untitled"
+            permission = metadata.get("permission", "public")
+
+            blocks.append(
+                f"[{index}] {title} "
+                f"(permission={permission}, score={chunk.score:.2f})\n"
+                f"{chunk.text.strip()}"
+            )
+
+        return "\n\n".join(blocks)

@@ -1,4 +1,9 @@
-﻿from typing import Any
+import logging
+import time
+from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentLoop:
@@ -26,6 +31,42 @@ class AgentLoop:
         self.last_task_state = None
 
     def run(
+        self,
+        messages: list[dict[str, Any]],
+        role: str = "employee",
+    ) -> str:
+        started_at = time.perf_counter()
+        logger.info("request_started role=%s", role)
+
+        try:
+            result = self._run(messages, role)
+            status = (
+                "failed"
+                if (
+                    self._is_error_result(result)
+                    or result == (
+                        "Sorry, I couldn't complete this after "
+                        "several tool calls."
+                    )
+                )
+                else "success"
+            )
+            logger.info(
+                "request_completed role=%s status=%s duration_ms=%.2f",
+                role,
+                status,
+                (time.perf_counter() - started_at) * 1000,
+            )
+            return result
+        except Exception:
+            logger.exception(
+                "request_failed role=%s duration_ms=%.2f",
+                role,
+                (time.perf_counter() - started_at) * 1000,
+            )
+            raise
+
+    def _run(
         self,
         messages: list[dict[str, Any]],
         role: str = "employee",
@@ -106,6 +147,8 @@ class AgentLoop:
                     if current_index is not None:
                         task_state.start_step(current_index)
 
+                tool_started_at = time.perf_counter()
+
                 if (
                     self.skill_registry is not None
                     and self.skill_registry.get(name) is not None
@@ -135,6 +178,10 @@ class AgentLoop:
                                 skill_arguments,
                             )
                         except Exception as exc:
+                            logger.exception(
+                                "skill_execution_failed skill=%s",
+                                name,
+                            )
                             result = f"Error: {exc}"
 
                 elif (
@@ -149,6 +196,10 @@ class AgentLoop:
                             mcp_arguments,
                         )
                     except Exception as exc:
+                        logger.exception(
+                            "mcp_tool_execution_failed tool=%s",
+                            name,
+                        )
                         result = f"Error: {exc}"
 
                 else:
@@ -158,6 +209,13 @@ class AgentLoop:
                     )
 
                 is_error = self._is_error_result(result)
+                logger.info(
+                    "tool_execution_completed tool=%s status=%s "
+                    "duration_ms=%.2f",
+                    name,
+                    "failed" if is_error else "success",
+                    (time.perf_counter() - tool_started_at) * 1000,
+                )
 
                 if task_state is not None and current_index is not None:
                     if is_error:
@@ -197,6 +255,7 @@ class AgentLoop:
             "Permission denied:",
             "unknown tool",
             "unknown skill",
+            "Tool execution failed.",
         )
 
         return result.startswith(error_prefixes)
