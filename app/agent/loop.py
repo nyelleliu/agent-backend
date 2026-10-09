@@ -125,9 +125,14 @@ class AgentLoop:
                         )
                     else:
                         try:
+                            skill_arguments = self._parse_arguments(arguments)
+
+                            if name == "knowledge_search":
+                                skill_arguments["_user_role"] = role
+
                             result = self.skill_registry.execute(
                                 name,
-                                self._parse_arguments(arguments),
+                                skill_arguments,
                             )
                         except Exception as exc:
                             result = f"Error: {exc}"

@@ -350,9 +350,11 @@ def upload_doc(
 @app.post("/chat")
 def chat(
     data: ChatMessage,
-    user_id: int = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
     db=Depends(get_db)
 ):
+    user_id = current_user["user_id"]
+
     user = db.query(User).filter(
         User.id == user_id
     ).first()

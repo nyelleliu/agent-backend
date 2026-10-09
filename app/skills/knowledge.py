@@ -27,7 +27,7 @@ class KnowledgeSearchSkill(Skill):
 
     def run(self, arguments: dict[str, Any]) -> str:
         query = arguments.get("query", "")
-        role = arguments.get("_user_role", "employee")
+        role = arguments.get("_user_role")
 
         if not query:
             return "Error: query is required"
