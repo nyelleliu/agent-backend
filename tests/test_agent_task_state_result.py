@@ -7,7 +7,7 @@ from app.tools.registry import ToolRegistry
 
 
 class FakePlanner:
-    def create_plan(self, user_request):
+    def create_plan(self, user_request, role=None):
         return [
             {
                 "description": "执行计算",
@@ -105,7 +105,7 @@ def test_agent_exposes_task_state():
     assert state.steps[1].status == "pending"
 
 class OutOfOrderPlanner:
-    def create_plan(self, user_request):
+    def create_plan(self, user_request, role=None):
         return [
             {
                 "description": "查询销售数据",

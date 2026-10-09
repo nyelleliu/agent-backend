@@ -50,6 +50,14 @@ class KnowledgeSearchSkill(Skill):
         if not query:
             return "Error: query is required"
 
+        ranked = self.search(query, role)
+
+        if not ranked:
+            return "No relevant reference material found."
+
+        return self._format(ranked)
+
+    def search(self, query: str, role: str | None = None) -> list:
         allowed_permissions = self.permission_checker.DOCUMENT_PERMISSIONS.get(
             role,
             {"public"},
@@ -60,16 +68,12 @@ class KnowledgeSearchSkill(Skill):
             allowed_permissions,
             top_k=self.candidate_k,
         )
-        ranked = self.reranker.rerank(
+
+        return self.reranker.rerank(
             query,
             candidates,
             top_k=self.top_k,
         )
-
-        if not ranked:
-            return "No relevant reference material found."
-
-        return self._format(ranked)
 
     @staticmethod
     def _format(chunks) -> str:

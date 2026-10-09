@@ -5,7 +5,7 @@ from app.tools.registry import ToolRegistry
 
 
 class FakePlanner:
-    def create_plan(self, user_request):
+    def create_plan(self, user_request, role=None):
         assert user_request == "计算 100 + 20"
 
         return [

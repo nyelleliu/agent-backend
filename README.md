@@ -4,7 +4,7 @@
 
 项目目标：构建一个具备 **Tool Calling、Skill、RAG、Memory、MCP、权限控制、多用户隔离**能力的企业级 Agent 后端，并通过实际工程代码学习 Agent 的核心架构。
 
-> 当前状态：核心 Agent 能力已经基本搭建完成，RAG 检索链路已升级为「智能切分 → 结构化元数据 → 混合召回 → 重排 → 带引用回答」，当前全量测试 **105 passed**。下一阶段重点是把 Planner / TaskState 完整接入 AgentLoop。
+> 当前状态：核心 Agent 能力已经基本搭建完成，RAG 检索链路为「智能切分 → 结构化元数据 → 混合召回 → 重排 → 带引用回答」，Planner / TaskState 已完整接入 AgentLoop 并带失败降级与角色过滤，RAG 有独立评测集。当前全量测试 **133 passed**。下一阶段重点是 Agent + Memory 深度结合与检索质量进阶（BM25 / Cross-Encoder）。
 
 ---
 
@@ -356,6 +356,35 @@ POST /upload_doc
 POST /chat
 ```
 
+`POST /upload_doc` 支持可选 `title`，入库时记录 `uploaded_by`。
+
+`POST /chat` 支持可选 `include_plan`：
+
+```json
+{"message": "帮我查一下差旅标准", "include_plan": true}
+```
+
+返回值额外包含 `plan`：
+
+```json
+{
+  "reply": "...",
+  "plan": {
+    "status": "completed",
+    "total": 2,
+    "completed": 2,
+    "failed": 0,
+    "pending": 0,
+    "running": 0,
+    "steps": [
+      {"description": "查询差旅标准", "tools": ["knowledge_search"], "status": "completed", "retry_count": 0}
+    ]
+  }
+}
+```
+
+`status` 取值：`completed` / `in_progress` / `failed`；没有 Planner 时为 `null`。
+
 ---
 
 ## 10. 测试
@@ -363,7 +392,7 @@ POST /chat
 当前全量测试：
 
 ```text
-105 passed
+133 passed
 ```
 
 测试覆盖主要包括：
@@ -379,10 +408,31 @@ POST /chat
 - RAG Chunker / Ingest / Retriever / Reranker
 - Knowledge Search 引用与权限
 - Planner / Task State 相关基础能力
+- Planner 失败降级、角色过滤、步数预算
 - Retry / Recovery
 - Error Handling
 
 每次重要功能修改后都会执行完整 pytest，确保已有 Agent 能力没有被破坏。
+
+### RAG 评测
+
+```bash
+python evals/run_rag_eval.py
+```
+
+```text
+数据集   evals/rag_cases.jsonl   查询 + 角色 + 相关/禁止标题
+语料     evals/corpus.jsonl      5 篇企业文档
+指标     hit_rate / recall@k / MRR / no_result_rate / permission_leaks
+```
+
+评测会真实入库并检索，权限泄漏数大于 0 时进程返回非 0 退出码，可直接接进 CI。
+
+当前指标：
+
+```text
+cases=8 top_k=3 hit_rate=1.0 recall@3=1.0 mrr=1.0 permission_leaks=0
+```
 
 ---
 
@@ -404,14 +454,15 @@ Redis                      ✅
 Multi-user                 ✅
 Authentication             ✅
 MCP 基础集成               ✅
-pytest                     ✅ 105 passed
+Planner 完整接入           ✅
+TaskState 状态回传         ✅
+Planner 角色过滤 + 降级    ✅
+RAG 评测集                 ✅
+pytest                     ✅ 133 passed
+rag_eval                   ✅ hit_rate=1.0 leaks=0
 
-Planner 完整接入           🚧
-TaskState 完整接入         🚧
-Planner → Tool/Skill       🚧
 Agent + Memory 深度结合    🚧
 MCP 高级能力               ⏳
-Evaluation                 ⏳
 Observability              ⏳
 Docker 部署                ⏳
 ```
@@ -420,9 +471,9 @@ Docker 部署                ⏳
 
 ## 12. 下一阶段路线
 
-### Phase 1：完善 Planner
+### Phase 1：完善 Planner（已完成）
 
-将 Planner 和 TaskState 真正接入 AgentLoop：
+执行链路：
 
 ```text
 User Task
@@ -446,12 +497,14 @@ Step 2
 Final Answer
 ```
 
-重点：
+重点（已完成）：
 
-- Planner 真正参与 Agent 执行
-- TaskState 记录任务状态
-- Step 与 Tool / Skill 对应
-- 支持任务成功 / 失败 / 重试
+- Planner 真正参与 Agent 执行，`create_plan` 抛错时记录日志并降级为无计划模式，请求不会 500
+- Planner 按角色过滤可用 Tool / Skill，无权使用的能力不会进入计划
+- TaskState 记录任务状态与重试次数，Step 与 Tool / Skill 对应
+- 支持任务成功 / 失败 / 重试，`summary()` 汇总整体状态
+- `max_steps` 随计划长度自动放大，长计划不会被截断
+- `/chat` 支持 `include_plan` 回传计划状态
 - 增加完整集成测试
 
 ### Phase 2：RAG 质量（已完成）

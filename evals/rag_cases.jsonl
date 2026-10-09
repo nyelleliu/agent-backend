@@ -1,0 +1,8 @@
+{"name": "employee-travel", "query": "差旅住宿费一天多少钱", "role": "employee", "relevant_titles": ["差旅报销标准"]}
+{"name": "finance-travel", "query": "出差住宿标准是多少", "role": "finance", "relevant_titles": ["差旅报销标准"]}
+{"name": "employee-leave", "query": "年假有几天怎么请假", "role": "employee", "relevant_titles": ["员工考勤制度"]}
+{"name": "employee-invoice-blocked", "query": "发票多久之内必须提交", "role": "employee", "relevant_titles": [], "forbidden_titles": ["财务发票管理"]}
+{"name": "finance-invoice", "query": "发票超过30天还能报销吗", "role": "finance", "relevant_titles": ["财务发票管理"]}
+{"name": "admin-permission", "query": "怎么给员工开通系统权限", "role": "admin", "relevant_titles": ["系统管理员手册"]}
+{"name": "employee-permission-blocked", "query": "管理员权限变更记录保留多久", "role": "employee", "relevant_titles": [], "forbidden_titles": ["系统管理员手册"]}
+{"name": "anyone-company", "query": "公司是做什么的什么时候成立", "role": "employee", "relevant_titles": ["公司简介"]}

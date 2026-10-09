@@ -69,6 +69,7 @@ planner = Planner(
     tool_registry=tool_registry,
     skill_registry=skill_registry,
     mcp_tool_registry=mcp_tool_registry,
+    permission_checker=permission_checker,
 )
 
 agent_loop = AgentLoop(
@@ -172,6 +173,17 @@ def add_document(text, permission, title=None, uploaded_by=None):
     )
 
 
+def build_chat_response(reply, include_plan=False, task_state=None):
+    payload = {"reply": reply}
+
+    if include_plan:
+        payload["plan"] = (
+            task_state.as_dict() if task_state is not None else None
+        )
+
+    return payload
+
+
 def hash_password(password):
     password_bytes = password.encode("utf-8")
     hashed = bcrypt.hashpw(
@@ -245,6 +257,7 @@ def get_current_user(
 
 class ChatMessage(BaseModel):
     message: str
+    include_plan: bool = False
 
 
 class DocumentUpload(BaseModel):
@@ -422,9 +435,11 @@ def chat(
         db
     )
 
-    return {
-        "reply": reply
-    }
+    return build_chat_response(
+        reply,
+        include_plan=data.include_plan,
+        task_state=agent_loop.last_task_state,
+    )
 
 
 

@@ -75,14 +75,20 @@ class AgentLoop:
 
         self.last_task_state = None
         task_state = None
+        steps_budget = self.max_steps
 
         if self.planner is not None:
             user_request = self._get_latest_user_message(messages)
 
             if user_request:
-                plan = self.planner.create_plan(user_request)
+                plan = self._create_plan(user_request, role)
 
                 if plan:
+                    steps_budget = max(
+                        self.max_steps,
+                        len(plan) + 1,
+                    )
+
                     if self.task_state_class is not None:
                         task_state = self.task_state_class(plan)
                         self.last_task_state = task_state
@@ -106,7 +112,7 @@ class AgentLoop:
                         },
                     )
 
-        for _ in range(self.max_steps):
+        for _ in range(steps_budget):
             capabilities = self.tool_registry.schemas()
 
             if self.skill_registry is not None:
@@ -244,6 +250,33 @@ class AgentLoop:
                 })
 
         return reply
+
+    def _create_plan(
+        self,
+        user_request: str,
+        role: str,
+    ) -> list[dict[str, Any]] | None:
+        try:
+            plan = self.planner.create_plan(user_request, role=role)
+        except Exception as exc:
+            logger.warning(
+                "planner_failed role=%s error=%s",
+                role,
+                exc,
+            )
+            return None
+
+        if not plan:
+            return None
+
+        if not isinstance(plan, list):
+            logger.warning(
+                "planner_failed role=%s error=plan is not a list",
+                role,
+            )
+            return None
+
+        return plan
 
     @staticmethod
     def _is_error_result(result: Any) -> bool:

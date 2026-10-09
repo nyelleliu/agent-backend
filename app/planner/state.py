@@ -55,6 +55,41 @@ class TaskState:
             for step in self.steps
         )
 
+    def summary(self) -> dict:
+        statuses = [step.status for step in self.steps]
+        completed = statuses.count("completed")
+        failed = statuses.count("failed")
+
+        if failed:
+            status = "failed"
+        elif completed == len(self.steps):
+            status = "completed"
+        else:
+            status = "in_progress"
+
+        return {
+            "status": status,
+            "total": len(self.steps),
+            "completed": completed,
+            "failed": failed,
+            "pending": statuses.count("pending"),
+            "running": statuses.count("running"),
+        }
+
+    def as_dict(self) -> dict:
+        payload = self.summary()
+        payload["steps"] = [
+            {
+                "description": step.description,
+                "tools": list(step.tools),
+                "status": step.status,
+                "retry_count": step.retry_count,
+            }
+            for step in self.steps
+        ]
+
+        return payload
+
     def as_text(self) -> str:
         return "\n".join(
             f"{i}. [{step.status}] {step.description} "

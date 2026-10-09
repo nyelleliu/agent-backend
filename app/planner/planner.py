@@ -9,13 +9,18 @@ class Planner:
         tool_registry=None,
         skill_registry=None,
         mcp_tool_registry=None,
+        permission_checker=None,
     ):
         self.client = client
         self.tool_registry = tool_registry
         self.skill_registry = skill_registry
         self.mcp_tool_registry = mcp_tool_registry
+        self.permission_checker = permission_checker
 
-    def _get_capabilities(self) -> list[dict[str, Any]]:
+    def _get_capabilities(
+        self,
+        role: str | None = None,
+    ) -> list[dict[str, Any]]:
         capabilities = []
 
         if self.tool_registry is not None:
@@ -48,13 +53,32 @@ class Planner:
                     "type": "mcp_tool",
                 })
 
-        return capabilities
+        if role is None or self.permission_checker is None:
+            return capabilities
+
+        return [
+            capability
+            for capability in capabilities
+            if self.permission_checker.has_permission(
+                role,
+                capability["name"],
+            )
+        ]
 
     def create_plan(
         self,
         user_request: str,
+        role: str | None = None,
     ) -> list[dict[str, Any]]:
-        capabilities = self._get_capabilities()
+        capabilities = self._get_capabilities(role)
+        known_tools = {
+            capability["name"]
+            for capability in self._get_capabilities()
+        }
+        allowed_tools = {
+            capability["name"]
+            for capability in capabilities
+        }
 
         capabilities_text = json.dumps(
             capabilities,
@@ -105,11 +129,6 @@ class Planner:
         if not isinstance(plan, list):
             raise ValueError("Planner result must be a list")
 
-        valid_capabilities = {
-            capability["name"]
-            for capability in capabilities
-        }
-
         for step in plan:
             if not isinstance(step, dict):
                 raise ValueError("Each plan step must be an object")
@@ -127,7 +146,7 @@ class Planner:
             unknown_tools = [
                 tool_name
                 for tool_name in step["tools"]
-                if tool_name not in valid_capabilities
+                if tool_name not in known_tools
             ]
 
             if unknown_tools:
@@ -135,5 +154,11 @@ class Planner:
                     "Planner returned unknown tools: "
                     + ", ".join(unknown_tools)
                 )
+
+            step["tools"] = [
+                tool_name
+                for tool_name in step["tools"]
+                if tool_name in allowed_tools
+            ]
 
         return plan

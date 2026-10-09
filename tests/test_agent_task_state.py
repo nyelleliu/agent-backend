@@ -7,7 +7,7 @@ from app.tools.registry import ToolRegistry
 
 
 class FakePlanner:
-    def create_plan(self, user_request):
+    def create_plan(self, user_request, role=None):
         return [
             {
                 "description": "执行计算",

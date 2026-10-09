@@ -70,7 +70,7 @@ def test_agent_retries_failed_tool():
     ]
 
     agent.planner = SimpleNamespace(
-        create_plan=lambda request: [
+        create_plan=lambda request, role=None: [
             {
                 "description": "执行计算",
                 "tools": ["calculate"],
