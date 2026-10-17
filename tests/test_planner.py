@@ -63,10 +63,12 @@ def test_planner_creates_plan():
     planner = Planner(
         FakeClient(),
         tool_registry=registry,
+        permission_checker=PermissionChecker(),
     )
 
     plan = planner.create_plan(
-        "分析今年销售额下降的原因"
+        "分析今年销售额下降的原因",
+        role="admin",
     )
 
     assert plan == [
@@ -183,7 +185,7 @@ def test_planner_keeps_tools_the_role_may_use():
     assert plan == [{"description": "执行任务", "tools": ["data_analysis"]}]
 
 
-def test_planner_without_role_does_not_filter():
+def test_planner_without_role_is_fail_closed():
     client = FixedPlanClient(["data_analysis"])
 
     planner = Planner(
@@ -194,4 +196,67 @@ def test_planner_without_role_does_not_filter():
 
     plan = planner.create_plan("分析销售额")
 
-    assert plan == [{"description": "执行任务", "tools": ["data_analysis"]}]
+    assert plan == [{"description": "执行任务", "tools": []}]
+    assert "data_analysis" not in client.last_system_prompt
+
+
+def test_planner_without_checker_is_fail_closed():
+    client = FixedPlanClient(["data_analysis"])
+
+    planner = Planner(
+        client,
+        tool_registry=FakeRegistry(["data_analysis"]),
+    )
+
+    plan = planner.create_plan("分析销售额", role="admin")
+
+    assert plan == [{"description": "执行任务", "tools": []}]
+    assert "data_analysis" not in client.last_system_prompt
+
+
+def test_planner_mcp_capabilities_use_mcp_permissions():
+    client = FixedPlanClient(
+        ["calculate", "get_company_info", "delete_everything"]
+    )
+
+    planner = Planner(
+        client,
+        tool_registry=FakeRegistry(["calculate"]),
+        mcp_tool_registry=FakeRegistry(
+            ["get_company_info", "delete_everything"]
+        ),
+        permission_checker=PermissionChecker(),
+    )
+
+    plan = planner.create_plan("查询公司信息", role="employee")
+
+    prompt = client.last_system_prompt
+    assert "calculate" in prompt
+    assert "get_company_info" in prompt
+    assert "delete_everything" not in prompt
+
+    assert plan == [
+        {
+            "description": "执行任务",
+            "tools": ["calculate", "get_company_info"],
+        }
+    ]
+
+
+def test_planner_drops_unauthorized_but_registered_tools():
+    client = FixedPlanClient(["data_analysis", "calculate"])
+
+    planner = Planner(
+        client,
+        tool_registry=FakeRegistry(["data_analysis", "calculate"]),
+        permission_checker=PermissionChecker(),
+    )
+
+    plan = planner.create_plan("分析数据", role="employee")
+
+    assert plan == [
+        {
+            "description": "执行任务",
+            "tools": ["calculate"],
+        }
+    ]

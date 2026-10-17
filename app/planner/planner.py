@@ -17,10 +17,8 @@ class Planner:
         self.mcp_tool_registry = mcp_tool_registry
         self.permission_checker = permission_checker
 
-    def _get_capabilities(
-        self,
-        role: str | None = None,
-    ) -> list[dict[str, Any]]:
+    def _all_capabilities(self) -> list[dict[str, Any]]:
+        """Every registered capability, with no permission filtering."""
         capabilities = []
 
         if self.tool_registry is not None:
@@ -53,17 +51,42 @@ class Planner:
                     "type": "mcp_tool",
                 })
 
-        if role is None or self.permission_checker is None:
-            return capabilities
+        return capabilities
 
-        return [
-            capability
-            for capability in capabilities
-            if self.permission_checker.has_permission(
-                role,
-                capability["name"],
-            )
-        ]
+    def _get_capabilities(
+        self,
+        role: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Capabilities this role may actually use.
+
+        Deny by default: a missing permission checker or a missing
+        role exposes nothing, matching AgentLoop.capabilities_for_role.
+        MCP tools are filtered with ``has_mcp_permission``, the same
+        rule the execution path uses for them.
+        """
+        capabilities = self._all_capabilities()
+
+        if role is None or self.permission_checker is None:
+            return []
+
+        allowed = []
+
+        for capability in capabilities:
+            if capability["type"] == "mcp_tool":
+                permitted = self.permission_checker.has_mcp_permission(
+                    role,
+                    capability["name"],
+                )
+            else:
+                permitted = self.permission_checker.has_permission(
+                    role,
+                    capability["name"],
+                )
+
+            if permitted:
+                allowed.append(capability)
+
+        return allowed
 
     def create_plan(
         self,
@@ -73,7 +96,7 @@ class Planner:
         capabilities = self._get_capabilities(role)
         known_tools = {
             capability["name"]
-            for capability in self._get_capabilities()
+            for capability in self._all_capabilities()
         }
         allowed_tools = {
             capability["name"]
