@@ -1,7 +1,12 @@
-﻿from typing import Any
+﻿import logging
+from typing import Any
 
+from app.core.errors import format_tool_error, log_tool_error
 from app.mcp.adapter import MCPToolAdapter
 from app.mcp.client import MCPClient
+
+
+logger = logging.getLogger(__name__)
 
 
 class MCPToolRegistry:
@@ -27,8 +32,7 @@ class MCPToolRegistry:
 
     def schemas(self) -> list[dict[str, Any]]:
         return [
-            tool.openai_schema()
-            for tool in self._tools.values()
+            tool.openai_schema() for tool in self._tools.values()
         ]
 
     def execute(
@@ -44,4 +48,8 @@ class MCPToolRegistry:
         try:
             return tool.execute(arguments)
         except Exception as exc:
-            return f"Error: {exc}"
+            # The model sees a sanitized category (for example
+            # "timeout_error"), never the transport-level detail.
+            log_tool_error(logger, exc, tool_name=name)
+
+            return format_tool_error(exc, tool_name=name)
