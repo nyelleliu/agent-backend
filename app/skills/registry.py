@@ -1,4 +1,10 @@
-﻿from app.skills.base import Skill
+﻿import logging
+
+from app.core.errors import format_tool_error, log_tool_error
+from app.skills.base import Skill
+
+
+logger = logging.getLogger(__name__)
 
 
 class SkillRegistry:
@@ -22,8 +28,7 @@ class SkillRegistry:
 
     def schemas(self) -> list[dict]:
         return [
-            skill.openai_schema()
-            for skill in self._skills.values()
+            skill.openai_schema() for skill in self._skills.values()
         ]
 
     def execute(self, name: str, arguments: dict):
@@ -35,4 +40,7 @@ class SkillRegistry:
         try:
             return skill.run(arguments)
         except Exception as exc:
-            return f"Error: {exc}"
+            # Sanitized for the model; full detail goes to the logs.
+            log_tool_error(logger, exc, tool_name=name)
+
+            return format_tool_error(exc, tool_name=name)

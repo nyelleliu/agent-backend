@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from abc import ABC, abstractmethod
 from typing import Any
+
+from app.core.errors import format_tool_error, log_tool_error
+
+
+logger = logging.getLogger(__name__)
 
 
 class Tool(ABC):
@@ -81,4 +87,8 @@ class ToolRegistry:
         except ZeroDivisionError:
             return "Error: division by zero"
         except Exception as exc:
-            return f"Error: {exc}"
+            # The model only receives a sanitized summary; the full
+            # detail (with credentials removed) stays in the logs.
+            log_tool_error(logger, exc, tool_name=name)
+
+            return format_tool_error(exc, tool_name=name)

@@ -4,6 +4,7 @@ import ast
 import operator
 from typing import Any
 
+from app.core.errors import format_tool_error
 from app.tools.registry import Tool
 
 _BIN_OPS = {
@@ -67,4 +68,8 @@ class CalculatorTool(Tool):
         except ZeroDivisionError:
             return "Error: division by zero"
         except Exception as exc:
-            return f"Error: {exc}"
+            # Same formatting rules as every other tool: a documented
+            # input error keeps its (redacted) message, anything else
+            # collapses to a category instead of relaying the raw
+            # exception text.
+            return format_tool_error(exc, tool_name=self.name)
