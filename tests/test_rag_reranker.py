@@ -157,3 +157,56 @@ def test_llm_reranker_falls_back_on_error():
     )
 
     assert [chunk.id for chunk in ranked] == ["strong", "weak"]
+
+
+def _raw_chunk(identifier, text, score=0.5, metadata=None):
+    return RetrievedChunk(
+        id=identifier,
+        text=text,
+        score=score,
+        metadata=metadata,
+        matched_by=("vector",),
+    )
+
+
+def test_heuristic_reranker_handles_none_metadata():
+    chunks = [
+        _raw_chunk("no-meta", "差旅报销标准是一线城市每天500元。", metadata=None),
+        _raw_chunk("normal", "市内交通费上限100元。", metadata={"title": "其他"}),
+    ]
+
+    ranked = HeuristicReranker().rerank(
+        "差旅报销标准",
+        chunks,
+        top_k=2,
+    )
+
+    assert [chunk.id for chunk in ranked] == ["no-meta", "normal"]
+
+
+def test_heuristic_reranker_handles_non_dict_metadata():
+    chunks = [
+        _raw_chunk("str-meta", "差旅报销标准是一线城市每天500元。", metadata="oops"),
+        _raw_chunk("int-meta", "市内交通费上限100元。", metadata=42),
+    ]
+
+    ranked = HeuristicReranker().rerank(
+        "差旅报销标准",
+        chunks,
+        top_k=2,
+    )
+
+    assert [chunk.id for chunk in ranked] == ["str-meta", "int-meta"]
+
+
+def test_llm_reranker_build_prompt_tolerates_abnormal_metadata():
+    chunks = [
+        _raw_chunk("a", "差旅报销标准", metadata=None),
+        _raw_chunk("b", "考勤制度", metadata="broken"),
+    ]
+    client, completions = make_client(content='{"ranked_ids": ["b", "a"]}')
+
+    ranked = LLMReranker(client).rerank("查询", chunks, top_k=2)
+
+    assert [chunk.id for chunk in ranked] == ["b", "a"]
+    assert completions.calls

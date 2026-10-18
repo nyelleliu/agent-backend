@@ -75,6 +75,11 @@ class FakeCollection:
                     {
                         "permission": document["permission"],
                         "title": document.get("title", ""),
+                        "doc_id": document.get(
+                            "doc_id",
+                            f"doc-{document['id']}",
+                        ),
+                        "chunk_index": document.get("chunk_index", 0),
                     }
                     for document in rows
                 ]

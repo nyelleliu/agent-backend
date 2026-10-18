@@ -205,6 +205,8 @@ class FakeCollection:
                     {
                         "title": document["title"],
                         "permission": document["permission"],
+                        "doc_id": f"doc-{document['title']}",
+                        "chunk_index": 0,
                     }
                     for document in rows
                 ]

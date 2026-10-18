@@ -2,10 +2,28 @@ from app.rag.retriever import Retriever
 
 
 class FakeCollection:
-    def __init__(self, documents, distances=None):
+    def __init__(
+        self,
+        documents,
+        distances=None,
+        ignore_permission_filter=False,
+    ):
         self.documents = documents
         self.distances = distances or {}
         self.queries = []
+        self.ignore_permission_filter = ignore_permission_filter
+
+    def _metadata_for(self, document):
+        """Full write-contract metadata unless the fixture overrides it."""
+        if "metadata" in document:
+            return document["metadata"]
+
+        return {
+            "permission": document["permission"],
+            "title": document.get("title", ""),
+            "doc_id": document.get("doc_id", f"doc-{document['id']}"),
+            "chunk_index": document.get("chunk_index", 0),
+        }
 
     def query(
         self,
@@ -25,11 +43,14 @@ class FakeCollection:
         )
 
         allowed = set(where["permission"]["$in"])
-        rows = [
-            document
-            for document in self.documents
-            if document["permission"] in allowed
-        ]
+        rows = list(self.documents)
+
+        if not self.ignore_permission_filter:
+            rows = [
+                document
+                for document in rows
+                if document.get("permission") in allowed
+            ]
 
         if where_document is not None:
             terms = _terms_from(where_document)
@@ -45,13 +66,7 @@ class FakeCollection:
             "ids": [[document["id"] for document in rows]],
             "documents": [[document["text"] for document in rows]],
             "metadatas": [
-                [
-                    {
-                        "permission": document["permission"],
-                        "title": document.get("title", ""),
-                    }
-                    for document in rows
-                ]
+                [self._metadata_for(document) for document in rows]
             ],
         }
 
@@ -283,3 +298,191 @@ def test_empty_permissions_return_nothing():
 
     assert results == []
     assert collection.queries == []
+
+
+def test_full_contract_record_is_retrieved():
+    collection = build_collection()
+
+    results = Retriever(collection).retrieve(
+        "差旅报销",
+        {"public", "employee"},
+        top_k=10,
+    )
+
+    by_id = {chunk.id: chunk for chunk in results}
+
+    assert "public-0" in by_id
+    metadata = by_id["public-0"].metadata
+    assert metadata["doc_id"] == "doc-public-0"
+    assert metadata["title"] == "差旅报销标准"
+    assert metadata["chunk_index"] == 0
+
+
+def test_records_missing_contract_fields_are_rejected():
+    documents = [
+        {
+            "id": "ok",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "title": "完整记录",
+            "doc_id": "doc-ok",
+            "chunk_index": 0,
+        },
+        {
+            "id": "no-doc-id",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "title": "缺 doc_id",
+            "metadata": {
+                "permission": "public",
+                "title": "缺 doc_id",
+                "chunk_index": 0,
+            },
+        },
+        {
+            "id": "no-title",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "metadata": {
+                "permission": "public",
+                "doc_id": "doc-no-title",
+                "chunk_index": 0,
+            },
+        },
+        {
+            "id": "no-chunk-index",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "metadata": {
+                "permission": "public",
+                "doc_id": "doc-no-chunk",
+                "title": "缺 chunk_index",
+            },
+        },
+    ]
+    collection = FakeCollection(
+        documents,
+        {document["id"]: 0.3 for document in documents},
+    )
+
+    results = Retriever(collection).retrieve(
+        "差旅报销",
+        {"public"},
+        top_k=10,
+    )
+
+    assert [chunk.id for chunk in results] == ["ok"]
+
+
+def test_none_empty_and_malformed_metadata_do_not_crash():
+    documents = [
+        {
+            "id": "none-meta",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "metadata": None,
+        },
+        {
+            "id": "empty-meta",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "metadata": {},
+        },
+        {
+            "id": "wrong-types",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "metadata": {
+                "permission": "public",
+                "doc_id": 123,
+                "title": None,
+                "chunk_index": True,
+            },
+        },
+        {
+            "id": "negative-chunk",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "metadata": {
+                "permission": "public",
+                "doc_id": "doc-neg",
+                "title": "负数 chunk_index",
+                "chunk_index": -1,
+            },
+        },
+        {
+            "id": "empty-permission",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "metadata": {
+                "permission": "",
+                "doc_id": "doc-empty-perm",
+                "title": "空权限",
+                "chunk_index": 0,
+            },
+        },
+    ]
+    collection = FakeCollection(
+        documents,
+        {document["id"]: 0.3 for document in documents},
+    )
+
+    results = Retriever(collection).retrieve(
+        "差旅报销",
+        {"public"},
+        top_k=10,
+    )
+
+    assert results == []
+
+
+def test_permission_outside_allowed_set_is_rejected_even_if_where_is_bypassed():
+    documents = [
+        {
+            "id": "finance-doc",
+            "text": "财务私有内容：差旅报销由财务总监特批。",
+            "permission": "finance",
+            "title": "财务制度",
+            "doc_id": "doc-finance",
+            "chunk_index": 0,
+        },
+    ]
+    collection = FakeCollection(
+        documents,
+        {"finance-doc": 0.1},
+        ignore_permission_filter=True,
+    )
+
+    results = Retriever(collection).retrieve(
+        "差旅报销",
+        {"public"},
+        top_k=10,
+    )
+
+    assert results == []
+
+
+def test_both_legs_apply_the_same_validation():
+    documents = [
+        {
+            "id": "legacy",
+            "text": "差旅报销标准是一线城市每天500元。",
+            "permission": "public",
+            "title": "旧记录",
+            "metadata": {
+                "permission": "public",
+                "title": "旧记录",
+            },
+        },
+    ]
+    collection = FakeCollection(documents, {"legacy": 0.2})
+
+    results = Retriever(collection).retrieve(
+        "差旅报销",
+        {"public"},
+        top_k=10,
+    )
+
+    # Both legs ran (vector + keyword) and both rejected the record.
+    assert len(collection.queries) == 2
+    assert results == []

@@ -48,8 +48,18 @@ class HeuristicReranker(Reranker):
                 relevance = min(chunk.score, 1.0)
             else:
                 text_terms = set(extract_terms(chunk.text))
+                metadata = (
+                    chunk.metadata
+                    if isinstance(chunk.metadata, dict)
+                    else {}
+                )
+                title_value = metadata.get("title")
                 title_terms = set(
-                    extract_terms(chunk.metadata.get("title") or "")
+                    extract_terms(
+                        title_value
+                        if isinstance(title_value, str)
+                        else ""
+                    )
                 )
 
                 text_coverage = (
@@ -143,7 +153,11 @@ class LLMReranker(Reranker):
         entries = []
 
         for chunk in candidates:
-            metadata = chunk.metadata or {}
+            metadata = (
+                chunk.metadata
+                if isinstance(chunk.metadata, dict)
+                else {}
+            )
 
             entries.append(
                 {

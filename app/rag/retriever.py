@@ -15,6 +15,51 @@ KEYWORD_SCORE_WEIGHT = 0.8
 MULTI_MATCH_BOOST = 0.05
 
 
+def _valid_candidate(text, metadata, allowed_permissions) -> bool:
+    """Minimum write-contract check shared by both retrieval legs.
+
+    Records that are incomplete (legacy imports without doc_id /
+    title / chunk_index), malformed, or carrying a permission outside
+    the request's allowed set are rejected outright — never repaired
+    or faked into looking like valid documents. The Chroma ``where``
+    filter is treated as an optimisation, not as the only enforcement.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+
+    if not isinstance(metadata, dict):
+        return False
+
+    permission = metadata.get("permission")
+
+    if not isinstance(permission, str) or not permission:
+        return False
+
+    if permission not in allowed_permissions:
+        return False
+
+    doc_id = metadata.get("doc_id")
+
+    if not isinstance(doc_id, str) or not doc_id:
+        return False
+
+    title = metadata.get("title")
+
+    if not isinstance(title, str) or not title.strip():
+        return False
+
+    chunk_index = metadata.get("chunk_index")
+
+    if (
+        isinstance(chunk_index, bool)
+        or not isinstance(chunk_index, int)
+        or chunk_index < 0
+    ):
+        return False
+
+    return True
+
+
 @dataclass
 class RetrievedChunk:
     id: str
@@ -101,11 +146,16 @@ class Retriever:
             if distance is not None and distance >= self.distance_threshold:
                 continue
 
+            metadata = metadatas[0][index] if metadatas[0] else None
+
+            if not _valid_candidate(document, metadata, permissions):
+                continue
+
             rows.append(
                 {
                     "id": self._row_id(ids, index, document),
                     "text": document,
-                    "metadata": metadatas[0][index] if metadatas[0] else {},
+                    "metadata": metadata,
                     "score": (
                         1.0 / (1.0 + distance)
                         if distance is not None
@@ -151,6 +201,11 @@ class Retriever:
             if not document:
                 continue
 
+            metadata = metadatas[0][index] if metadatas[0] else None
+
+            if not _valid_candidate(document, metadata, permissions):
+                continue
+
             lowered = document.lower()
             hits = sum(1 for term in terms if term in lowered)
 
@@ -161,7 +216,7 @@ class Retriever:
                 {
                     "id": self._row_id(ids, index, document),
                     "text": document,
-                    "metadata": metadatas[0][index] if metadatas[0] else {},
+                    "metadata": metadata,
                     "score": KEYWORD_SCORE_WEIGHT * hits / len(terms),
                 }
             )
