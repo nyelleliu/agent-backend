@@ -16,6 +16,9 @@ class FakeColumn:
     def asc(self):
         return ("asc", self.name)
 
+    def desc(self):
+        return ("desc", self.name)
+
 
 class FakeRedis:
     def __init__(self):
@@ -54,10 +57,23 @@ class FakeQuery:
         return self
 
     def order_by(self, *args):
-        self.rows = sorted(
-            self.rows,
-            key=lambda row: row.id,
-        )
+        for arg in args:
+            reverse = arg[0] == "desc"
+            field = arg[1]
+
+            self.rows = sorted(
+                self.rows,
+                key=lambda row: getattr(row, field),
+                reverse=reverse,
+            )
+
+        return self
+
+    def limit(self, count):
+        self.rows = self.rows[:count]
+        return self
+
+    def with_for_update(self):
         return self
 
     def first(self):
@@ -149,6 +165,30 @@ def create_manager(llm):
     )
 
 
+class BrokenRedis:
+    """Redis stub that fails on every operation."""
+
+    def get(self, key):
+        raise ConnectionError(
+            "Error 111 connecting to redis:6379. Connection refused."
+        )
+
+    def setex(self, key, seconds, value):
+        raise ConnectionError("redis is unavailable")
+
+    def delete(self, key):
+        raise ConnectionError("redis is unavailable")
+
+
+def create_manager_with_redis(redis_client, llm):
+    return MemoryManager(
+        redis_client=redis_client,
+        llm_client=llm,
+        message_model=FakeMessage,
+        summary_model=FakeSummary,
+    )
+
+
 def test_get_history_without_summary():
     messages = [
         FakeMessage(1, "user", "你好"),
@@ -163,6 +203,99 @@ def test_get_history_without_summary():
     assert len(history) == 2
     assert history[0]["content"] == "你好"
     assert history[1]["content"] == "你好，有什么可以帮你？"
+
+
+def test_get_history_is_capped_at_recent_limit():
+    messages = [
+        FakeMessage(index, "user", f"message {index}")
+        for index in range(1, 31)
+    ]
+
+    db = FakeDB(messages)
+    manager = create_manager(FakeLLM())
+    manager.recent_limit = 20
+
+    history = manager.get_chat_history(1, db)
+
+    assert len(history) == 20
+    assert history[0]["content"] == "message 11"
+    assert history[-1]["content"] == "message 30"
+
+
+def test_recent_messages_after_summary_are_capped():
+    summary = FakeSummary("早期对话摘要", 2)
+
+    messages = [
+        FakeMessage(index, "user", f"message {index}")
+        for index in range(1, 31)
+    ]
+
+    db = FakeDB(messages, summary)
+    manager = create_manager(FakeLLM())
+    manager.recent_limit = 5
+
+    history = manager.get_chat_history(1, db)
+
+    assert history[0]["role"] == "system"
+    assert "早期对话摘要" in history[0]["content"]
+    assert len(history) == 6
+    assert history[-1]["content"] == "message 30"
+
+
+def test_get_history_survives_redis_failure():
+    messages = [
+        FakeMessage(1, "user", "你好"),
+        FakeMessage(2, "assistant", "你好，有什么可以帮你？"),
+    ]
+
+    db = FakeDB(messages)
+    manager = create_manager_with_redis(BrokenRedis(), FakeLLM())
+
+    history = manager.get_chat_history(1, db)
+
+    assert len(history) == 2
+    assert history[0]["content"] == "你好"
+    assert history[1]["content"] == "你好，有什么可以帮你？"
+
+
+def test_summary_history_survives_redis_failure():
+    summary = FakeSummary("用户正在开发企业内部 Agent。", 2)
+
+    messages = [
+        FakeMessage(1, "user", "你好"),
+        FakeMessage(2, "assistant", "你好"),
+        FakeMessage(3, "user", "继续开发 Agent"),
+        FakeMessage(4, "assistant", "好的"),
+    ]
+
+    db = FakeDB(messages, summary)
+    manager = create_manager_with_redis(BrokenRedis(), FakeLLM())
+
+    history = manager.get_chat_history(1, db)
+
+    assert history[0]["role"] == "system"
+    assert "企业内部 Agent" in history[0]["content"]
+    assert len(history) == 3
+    assert history[-1]["content"] == "好的"
+
+
+def test_compression_survives_redis_failure():
+    messages = [
+        FakeMessage(index, "user", f"message {index}")
+        for index in range(1, 21)
+    ]
+
+    db = FakeDB(messages)
+    manager = create_manager_with_redis(BrokenRedis(), FakeLLM())
+
+    manager.maybe_compress_history(
+        user_id=1,
+        db=db,
+        threshold=20,
+    )
+
+    assert db.summary is not None
+    assert db.summary.summary_text == "新的对话摘要"
 
 
 def test_get_history_with_summary():
