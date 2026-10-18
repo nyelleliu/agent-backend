@@ -1,6 +1,7 @@
 ﻿from types import SimpleNamespace
 
 from app.agent.loop import AgentLoop
+from app.permissions.checker import PermissionChecker
 from app.tools.registry import ToolRegistry
 
 
@@ -68,6 +69,7 @@ def create_agent(client):
     return AgentLoop(
         client=client,
         tool_registry=tool_registry,
+        permission_checker=PermissionChecker(),
         max_steps=5,
     )
 
@@ -83,7 +85,7 @@ def test_agent_can_execute_multiple_steps():
         }
     ]
 
-    reply = agent.run(messages)
+    reply, _ = agent.run(messages)
 
     assert reply == "计算结果是 120"
     assert client.call_count == 2
@@ -109,7 +111,7 @@ def test_agent_stops_after_max_steps():
         }
     ]
 
-    reply = agent.run(messages)
+    reply, _ = agent.run(messages)
 
     assert reply == "Sorry, I couldn't complete this after several tool calls."
     assert client.call_count == 5

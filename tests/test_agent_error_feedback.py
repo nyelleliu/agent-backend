@@ -1,6 +1,7 @@
 ﻿from types import SimpleNamespace
 
 from app.agent.loop import AgentLoop
+from app.permissions.checker import PermissionChecker
 from app.tools.calculator import CalculatorTool
 from app.tools.registry import ToolRegistry
 
@@ -76,6 +77,7 @@ def test_agent_returns_tool_error_to_llm():
     agent = AgentLoop(
         client=client,
         tool_registry=registry,
+        permission_checker=PermissionChecker(),
         max_steps=2,
     )
 
@@ -86,7 +88,7 @@ def test_agent_returns_tool_error_to_llm():
         }
     ]
 
-    reply = agent.run(messages)
+    reply, _ = agent.run(messages)
 
     assert reply == "发现工具执行失败"
 

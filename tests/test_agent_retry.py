@@ -1,6 +1,7 @@
 ﻿from types import SimpleNamespace
 
 from app.agent.loop import AgentLoop
+from app.permissions.checker import PermissionChecker
 from app.planner.state import TaskState
 from app.tools.registry import ToolRegistry
 
@@ -56,6 +57,7 @@ def test_agent_retries_failed_tool():
     agent = AgentLoop(
         client=client,
         tool_registry=ToolRegistry(),
+        permission_checker=PermissionChecker(),
         planner=None,
         task_state_class=TaskState,
         max_steps=2,
@@ -78,9 +80,7 @@ def test_agent_retries_failed_tool():
         ]
     )
 
-    agent.run(messages)
-
-    state = agent.last_task_state
+    _, state = agent.run(messages)
 
     assert state.steps[0].retry_count == 1
     assert state.steps[0].status == "failed"

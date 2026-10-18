@@ -69,6 +69,6 @@ def test_agent_uses_planner():
         }
     ]
 
-    reply = agent.run(messages)
+    reply, _ = agent.run(messages)
 
     assert reply == "计算结果是 120"

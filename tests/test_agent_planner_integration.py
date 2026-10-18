@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from app.agent.loop import AgentLoop
+from app.permissions.checker import PermissionChecker
 from app.planner.state import TaskState
 from app.tools.registry import ToolRegistry
 
@@ -78,6 +79,7 @@ def build_agent(planner, client=None, **kwargs):
     return AgentLoop(
         client=client or ScriptedClient(),
         tool_registry=ToolRegistry(),
+        permission_checker=PermissionChecker(),
         planner=planner,
         task_state_class=TaskState,
         **kwargs,
@@ -92,20 +94,20 @@ def test_agent_survives_planner_failure():
     client = ScriptedClient()
     agent = build_agent(BrokenPlanner(), client=client)
 
-    reply = run(agent, "计算 1 + 1")
+    reply, state = run(agent, "计算 1 + 1")
 
     assert reply == "最终答案"
     assert client.call_count == 2
-    assert agent.last_task_state is None
+    assert state is None
 
 
 def test_agent_survives_invalid_planner_result():
     agent = build_agent(NotAListPlanner())
 
-    reply = run(agent)
+    reply, state = run(agent)
 
     assert reply == "最终答案"
-    assert agent.last_task_state is None
+    assert state is None
 
 
 def test_agent_passes_role_to_planner():
@@ -124,13 +126,13 @@ def test_agent_allows_more_steps_than_default_for_long_plan():
     client = ScriptedClient(always_tool_call=True)
     agent = build_agent(planner, client=client)
 
-    reply = run(agent)
+    reply, state = run(agent)
 
     assert reply == (
         "Sorry, I couldn't complete this after several tool calls."
     )
     assert client.call_count == 11
-    assert agent.last_task_state.summary()["total"] == 10
+    assert state.summary()["total"] == 10
 
 
 def test_agent_uses_default_budget_for_short_plan():
@@ -150,3 +152,33 @@ def test_agent_does_not_inject_plan_when_planner_fails():
     agent.run(messages)
 
     assert messages[0] == {"role": "user", "content": "问题"}
+
+
+def test_agent_skips_planner_for_greeting():
+    planner = RecordingPlanner()
+    client = ScriptedClient()
+    agent = build_agent(planner, client=client)
+
+    reply, state = run(agent, "你好")
+
+    assert reply == "最终答案"
+    assert planner.calls == []
+    assert state is None
+
+
+def test_agent_can_disable_greeting_skip():
+    planner = RecordingPlanner()
+    agent = build_agent(planner, skip_plan_for_greetings=False)
+
+    run(agent, "你好")
+
+    assert len(planner.calls) == 1
+
+
+def test_agent_still_plans_non_greeting_messages():
+    planner = RecordingPlanner()
+    agent = build_agent(planner)
+
+    run(agent, "帮我查一下差旅标准")
+
+    assert len(planner.calls) == 1

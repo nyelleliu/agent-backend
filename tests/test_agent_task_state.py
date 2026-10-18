@@ -1,6 +1,7 @@
 ﻿from types import SimpleNamespace
 
 from app.agent.loop import AgentLoop
+from app.permissions.checker import PermissionChecker
 from app.planner.state import TaskState
 from app.tools.calculator import CalculatorTool
 from app.tools.registry import ToolRegistry
@@ -83,6 +84,7 @@ def test_agent_updates_task_state():
     agent = AgentLoop(
         client=client,
         tool_registry=tools,
+        permission_checker=PermissionChecker(),
         planner=FakePlanner(),
         task_state_class=TaskState,
     )
@@ -94,7 +96,7 @@ def test_agent_updates_task_state():
         }
     ]
 
-    reply = agent.run(messages)
+    reply, _ = agent.run(messages)
 
     assert reply == "计算结果是 120"
 

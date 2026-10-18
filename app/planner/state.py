@@ -1,4 +1,18 @@
-﻿from dataclasses import dataclass
+﻿import re
+from dataclasses import dataclass
+
+
+# Descriptions that describe answer-generation work (生成/归纳/引用/
+# 总结 a final reply) rather than work that needs a tool call. Only
+# pending steps matching this pattern AND carrying no tools are
+# completed when the model returns its final answer.
+ANSWER_STEP_PATTERN = re.compile(
+    r"(回答|回复|答复|总结|概括|归纳|引用|引述|汇总|整理|撰写|生成"
+    r"|说明|解释|输出|汇报"
+    r"|answer|summar|cite|citation|conclud|synthes|draft|writ"
+    r"|explain|report|compile|organiz|present)",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -31,6 +45,25 @@ class TaskState:
     def retry_step(self, index: int):
         self.steps[index].retry_count += 1
         self.steps[index].status = "pending"
+
+    def finalize_answer_steps(self) -> None:
+        """Settle tool-less answer-type steps once a final answer exists.
+
+        Conservative (plan B): only pending steps that need no tool
+        AND whose description is answer-generation work (生成/引用/
+        总结…) are completed — the final reply itself fulfils them.
+        Pending steps that still reference tools keep their status so
+        the plan summary never reports work that was not executed.
+        """
+        for step in self.steps:
+            if step.status != "pending":
+                continue
+
+            if step.tools:
+                continue
+
+            if ANSWER_STEP_PATTERN.search(step.description or ""):
+                step.status = "completed"
 
     def current_step(self) -> PlanStep | None:
         for step in self.steps:

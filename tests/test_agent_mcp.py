@@ -3,6 +3,7 @@
 from app.agent.loop import AgentLoop
 from app.mcp.client import MCPClient
 from app.mcp.tool_registry import MCPToolRegistry
+from app.permissions.checker import PermissionChecker
 from app.tools.registry import ToolRegistry
 
 
@@ -72,6 +73,7 @@ def create_agent(client):
         client=client,
         tool_registry=tool_registry,
         mcp_tool_registry=mcp_tool_registry,
+        permission_checker=PermissionChecker(),
         max_steps=5,
     )
 
@@ -87,7 +89,7 @@ def test_agent_can_execute_mcp_tool():
         }
     ]
 
-    reply = agent.run(messages)
+    reply, _ = agent.run(messages)
 
     assert reply == "OpenAI 是一家 AI 研究和部署公司。"
     assert client.call_count == 2
