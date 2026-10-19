@@ -1,7 +1,12 @@
 ﻿debug_log.txt
 __pycache__/
 *.pyc
+.pytest_cache/
 
 chroma_data/
 
 .env
+
+# Runtime logs (LOG_FILE / uvicorn redirection). Files stay on disk;
+# they are just never tracked.
+logs/

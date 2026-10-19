@@ -1,0 +1,56 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      MYSQL_HOST: mysql
+      REDIS_HOST: redis
+      AUTO_CREATE_TABLES: "true"
+      LOG_FILE: /app/logs/agent-backend.log
+    volumes:
+      - chroma_data:/app/chroma_data
+      - app_logs:/app/logs
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      MYSQL_ROOT_HOST: "%"
+      MYSQL_DATABASE: agent_db
+    healthcheck:
+      # The password must never appear in the process list: pass it
+      # through MYSQL_PWD (read from the container's own environment)
+      # instead of a -p... command-line argument, and never prefix it
+      # with anything - the root password IS MYSQL_ROOT_PASSWORD.
+      test:
+        [
+          "CMD-SHELL",
+          "MYSQL_PWD=\"$${MYSQL_ROOT_PASSWORD}\" mysqladmin ping -h127.0.0.1 -uroot --silent",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+volumes:
+  chroma_data:
+  app_logs:
+  mysql_data:
+  redis_data:

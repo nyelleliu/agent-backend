@@ -5,6 +5,7 @@ openai==2.29.0
 chromadb==1.5.9
 SQLAlchemy==2.0.48
 PyMySQL==1.2.0
+cryptography==50.0.1
 redis==8.1.0
 bcrypt==5.0.0
 PyJWT==2.14.0

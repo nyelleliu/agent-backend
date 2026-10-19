@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.env
+chroma_data/
+debug_log.txt
+logs/
+tests/
+evals/
+.github/
+README.md

@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: agent_db
+        ports:
+          - "3306:3306"
+        options: >-
+          --health-cmd "MYSQL_PWD=root mysqladmin ping -h 127.0.0.1 -uroot --silent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - "6379:6379"
+
+    env:
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      AUTO_CREATE_TABLES: "true"
+      JWT_SECRET_KEY: ci-secret-not-for-production-0123456789
+      DEEPSEEK_API_KEY: ci-placeholder-not-used
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Wait for MySQL
+        run: |
+          for i in $(seq 1 30); do
+            if MYSQL_PWD=root mysqladmin ping -h 127.0.0.1 -uroot --silent; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready" >&2
+          exit 1
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Run RAG evaluation
+        run: python evals/run_rag_eval.py
