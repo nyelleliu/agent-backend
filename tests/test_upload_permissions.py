@@ -1,7 +1,12 @@
 import pytest
 from fastapi import HTTPException
+from types import SimpleNamespace
 
 import main
+
+
+def make_user(user_id, role):
+    return SimpleNamespace(id=user_id, role=role)
 
 
 def test_employee_cannot_upload_admin_document():
@@ -10,10 +15,7 @@ def test_employee_cannot_upload_admin_document():
         permission="admin",
     )
 
-    current_user = {
-        "user_id": 1,
-        "role": "employee",
-    }
+    current_user = make_user(1, "employee")
 
     with pytest.raises(HTTPException) as exc_info:
         main.upload_doc(data, current_user)
@@ -27,10 +29,7 @@ def test_employee_can_upload_employee_document(monkeypatch):
         permission="employee",
     )
 
-    current_user = {
-        "user_id": 1,
-        "role": "employee",
-    }
+    current_user = make_user(1, "employee")
 
     called = {}
 
@@ -47,6 +46,7 @@ def test_employee_can_upload_employee_document(monkeypatch):
     assert result == {"message": "Document stored"}
     assert called["text"] == "employee document"
     assert called["permission"] == "employee"
+    assert called["uploaded_by"] == 1
 
 
 def test_finance_can_upload_finance_document(monkeypatch):
@@ -55,10 +55,7 @@ def test_finance_can_upload_finance_document(monkeypatch):
         permission="finance",
     )
 
-    current_user = {
-        "user_id": 2,
-        "role": "finance",
-    }
+    current_user = make_user(2, "finance")
 
     called = {}
 
@@ -83,10 +80,7 @@ def test_admin_can_upload_admin_document(monkeypatch):
         permission="admin",
     )
 
-    current_user = {
-        "user_id": 3,
-        "role": "admin",
-    }
+    current_user = make_user(3, "admin")
 
     called = {}
 
