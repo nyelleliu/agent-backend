@@ -344,7 +344,8 @@ def test_case_budget_prevents_actual_excess_requests():
     )
 
     assert raw.calls == 1
-    assert report["global_llm_call_attempt_count"] == 1
+    assert report["global_llm_call_attempt_count"] == 2
+    assert report["global_llm_forwarded_request_attempt_count"] == 1
     assert report["results"][0]["task_success"] is False
     assert report["results"][0]["llm_call_attempt_count"] == 2
     assert report["results"][0]["stop_reason"] == "per_case_llm_call_budget_exhausted"
@@ -367,7 +368,8 @@ def test_global_budget_prevents_actual_excess_requests_inside_agent_loop():
     )
 
     assert raw.calls == 1
-    assert report["global_llm_call_attempt_count"] == 1
+    assert report["global_llm_call_attempt_count"] == 2
+    assert report["global_llm_forwarded_request_attempt_count"] == 1
     assert report["results"][0]["task_success"] is False
     assert report["results"][0]["stop_reason"] == "global_llm_call_budget_exhausted"
     assert report["results"][0]["tool_execution_count"] == 1

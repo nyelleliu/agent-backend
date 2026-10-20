@@ -694,6 +694,7 @@ class BudgetedLiveClient:
     def create(self, **kwargs):
         self.case_attempts += 1
         self.turn_attempts += 1
+        self.global_budget["attempts"] += 1
         if time.monotonic() >= self.deadline:
             raise LiveBudgetStop("total_runtime_budget_exhausted")
         if self.case_budget_used >= self.case_budget:
@@ -838,7 +839,7 @@ def run_live_evaluation(
 
     run_started = time.monotonic()
     deadline = time.monotonic() + total_timeout
-    global_budget = {"used": 0, "limit": max_total_calls}
+    global_budget = {"used": 0, "attempts": 0, "limit": max_total_calls}
     factory = client_factory or _create_live_client
     initialization_started = time.monotonic()
     # Constructing the client is gated behind this function, which the CLI calls only for --live.
@@ -849,7 +850,8 @@ def run_live_evaluation(
             "mode": "live",
             "cases_requested": case_limit,
             "cases_run": 0,
-            "global_llm_call_attempt_count": 0,
+            "global_llm_call_attempt_count": global_budget["attempts"],
+            "global_llm_forwarded_request_attempt_count": global_budget["used"],
             "global_llm_call_budget": max_total_calls,
             "client_initialization_duration_ms": round((time.monotonic() - initialization_started) * 1000, 3),
             "duration_ms": round((time.monotonic() - run_started) * 1000, 3),
@@ -1005,7 +1007,8 @@ def run_live_evaluation(
         "mode": "live",
         "cases_requested": case_limit,
         "cases_run": len(results),
-        "global_llm_call_attempt_count": global_budget["used"],
+        "global_llm_call_attempt_count": global_budget["attempts"],
+        "global_llm_forwarded_request_attempt_count": global_budget["used"],
         "global_llm_call_budget": global_budget["limit"],
         "client_initialization_duration_ms": round((time.monotonic() - initialization_started) * 1000, 3),
         "duration_ms": round((time.monotonic() - run_started) * 1000, 3),

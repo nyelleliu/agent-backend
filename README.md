@@ -4,7 +4,7 @@
 
 项目目标：构建一个具备 **Tool Calling、Skill、RAG、Memory、MCP、权限控制、多用户隔离**能力的企业级 Agent 后端，并通过实际工程代码学习 Agent 的核心架构。
 
-> 当前状态：核心 Agent 能力已经基本搭建完成，RAG 检索链路为「智能切分 → 结构化元数据 → 混合召回 → 重排 → 带引用回答」，Planner / TaskState 已完整接入 AgentLoop 并带失败降级与角色过滤，RAG 有独立评测集。最近一次全量验证（2026-10-19）**368 项，368 passed / 0 failed / 0 skipped / 5 warnings**（本机 Python 3.13 验证，`python -m pytest -q`；5 条警告均为 16 字节 `JWT_SECRET_KEY` 触发的 PyJWT 密钥长度警告，见第 10 节；仅 `test_main.py::test_register_new_user` 会写数据库，且验证使用一次性 MySQL 容器，未写开发库）。下一阶段重点是 Agent + Memory 深度结合与检索质量进阶（BM25 / Cross-Encoder）。
+> 当前状态：核心 Agent 能力已经基本搭建完成，RAG 检索链路为「智能切分 → 结构化元数据 → 混合召回 → 重排 → 带引用回答」，Planner / TaskState 已完整接入 AgentLoop 并带失败降级与角色过滤，RAG 有独立评测集。历史全量验证记录（2026-10-19）：**368 项，368 passed / 0 failed / 0 skipped / 5 warnings**（本机 Python 3.13 执行 `python -m pytest -q`；这不是当前测试总数，详见第 10 节）。下一阶段重点是 Agent + Memory 深度结合与检索质量进阶（BM25 / Cross-Encoder）。
 
 ---
 
@@ -462,15 +462,15 @@ POST /chat
 
 ## 10. 测试
 
-当前全量测试：
+历史全量测试记录（2026-10-19；不代表当前测试总数）：
 
 ```text
 收集 368 项 —— 368 passed / 0 failed / 0 skipped / 5 warnings
 ```
 
-以上为本机（Python 3.13）执行 `python -m pytest -q` 的验证结果（2026-10-19，耗时约 29s）。验证使用一次性 MySQL 8.4 容器与独立 Redis 容器，开发库零写入；5 条警告全部是 PyJWT 的 `InsecureKeyLengthWarning`（测试所用 `JWT_SECRET_KEY` 为 16 字节，低于 HS256 建议的 32 字节，属配置问题、非代码缺陷；`main.py` 在启动时也会打印一条只含长度的告警）。
+以上是本机（Python 3.13）于 2026-10-19 执行 `python -m pytest -q` 的历史验证记录，耗时约 29s。它没有覆盖之后增加的测试，因此不应视为当前测试总数或当前通过结果。该次验证使用一次性 MySQL 8.4 容器与独立 Redis 容器，开发库零写入；5 条警告全部是 PyJWT 的 `InsecureKeyLengthWarning`（测试所用 `JWT_SECRET_KEY` 为 16 字节，低于 HS256 建议的 32 字节；`main.py` 启动时也会打印一条只含长度的告警）。
 
-其中仅 **1 项**会写数据库：`test_main.py::test_register_new_user` 通过 `/register` 追加测试用户（uuid 命名、只增不改不删），写入的是上述一次性容器。B7 隔离改造后，`tests/test_degradation.py` 与 `tests/test_upload_encoding.py` 均通过 `_StubDB` + `get_db` override 在内存中完成，不再触碰 MySQL。其余 367 项仅使用 Fake/Stub，不写库、不写向量库、不调用外部 LLM（`evals/run_rag_eval.py` 使用临时目录中的独立 Chroma collection）。
+该次记录中仅 **1 项**会写数据库：`test_main.py::test_register_new_user` 通过 `/register` 追加测试用户（uuid 命名、只增不改不删），写入的是上述一次性容器。B7 隔离改造后，`tests/test_degradation.py` 与 `tests/test_upload_encoding.py` 均通过 `_StubDB` + `get_db` override 在内存中完成，不再触碰 MySQL。其余 367 项仅使用 Fake/Stub，不写库、不写向量库、不调用外部 LLM（`evals/run_rag_eval.py` 使用临时目录中的独立 Chroma collection）。
 
 测试覆盖主要包括：
 
@@ -722,6 +722,24 @@ docker compose up -d --build
 ---
 
 ## 15. 项目定位
+
+## 16. 差旅助手 MVP（新增）
+
+项目现在包含一个可复现的差旅预算 MVP：`calculate_travel_budget` 是确定性工具，按职级返回住宿、餐补和交通标准、实际费用、总额、超标项、假设和模拟数据标记。标准覆盖城市仅为上海、北京、深圳、广州；四城当前使用相同的模拟职级标准，其他城市返回输入错误，不套用默认值。每项费用必须为有限的非负数且不超过 1,000,000；天数为 1–90 的整数。该数据不是企业真实制度，也不能用于实际报销决策。
+
+运行固定验收集：
+
+```bash
+python evals/run_agent_eval.py
+```
+
+任务集位于 `evals/agent_cases.jsonl`，包含 20 个固定场景 ID。`evals/run_agent_eval.py` 按案例 ID 选择预设参数，直接验证差旅工具行为；只有权限案例驱动 AgentLoop。JSONL 中的自然语言 `message` 不会被解析，因此该脚本的通过率是确定性工具/权限契约检查结果，不是自然语言端到端或真实模型成功率。2026-10-20 的本地历史记录为 18/20；`correct_city` 和 `correct_days` 报告为 `not_implemented` 并计为失败。
+
+`evals/run_agent_loop_eval.py` 另提供 11 个 Fake Client 场景，实际执行 AgentLoop、工具注册和权限路径，但模型响应由脚本预设；其通过率只说明这些离线执行路径和断言通过，不能证明真实模型理解或多轮更正能力。脚本也有显式 `--live` 模式，但本项目尚未在此记录真实模型评测结果。Fake 响应中的 usage 是模拟指标；真实 Token 只能在 live 响应提供合法 usage 时报告。live 报告中的 `llm_call_attempt_count` 统计进入 `create()` 的尝试（包括被预算拒绝的尝试），`global_llm_forwarded_request_attempt_count` 统计通过预算检查并转发给客户端的请求尝试。
+
+差旅工具按天数计算住宿和餐补，并将交通费用视为整段行程总额；输入没有出行人数或起止日期，因此结果不按人数缩放、也不根据具体日期调整。所有标准均为模拟数据，不代表真实企业差旅制度或报销结论。
+
+AgentLoop 还提供工具调用预算（默认 12 次）和上下文字符预算（默认 24,000），超过预算会安全终止或裁剪最旧上下文。生产环境仍需在 API 网关或异步任务层增加硬超时。
 
 最终目标：
 
