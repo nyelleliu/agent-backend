@@ -2,6 +2,14 @@
 from typing import Any
 
 
+from app.agent.request_budget import (
+    ContextBudgetExceeded,
+    DEFAULT_MAX_CONTEXT_CHARS,
+    effective_context_budget,
+    serialized_request_size,
+)
+
+
 class Planner:
     def __init__(
         self,
@@ -10,12 +18,14 @@ class Planner:
         skill_registry=None,
         mcp_tool_registry=None,
         permission_checker=None,
+        max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
     ):
         self.client = client
         self.tool_registry = tool_registry
         self.skill_registry = skill_registry
         self.mcp_tool_registry = mcp_tool_registry
         self.permission_checker = permission_checker
+        self.max_context_chars = effective_context_budget(max_context_chars)
 
     def _all_capabilities(self) -> list[dict[str, Any]]:
         """Every registered capability, with no permission filtering."""
@@ -77,6 +87,12 @@ class Planner:
                     role,
                     capability["name"],
                 )
+            elif capability["type"] == "skill":
+                skill = self.skill_registry.get(capability["name"])
+                permission = getattr(skill, "permission", None)
+                permitted = bool(permission) and (
+                    self.permission_checker.has_permission(role, permission)
+                )
             else:
                 permitted = self.permission_checker.has_permission(
                     role,
@@ -109,35 +125,44 @@ class Planner:
             indent=2,
         )
 
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a task planner. "
+                    "Break the user's request into a small number "
+                    "of clear, executable steps.\n\n"
+                    "For every step, specify:\n"
+                    "1. description: what the step does\n"
+                    "2. tools: the names of tools or skills that "
+                    "can execute this step\n\n"
+                    "Only use tools or skills from the provided "
+                    "capability list.\n"
+                    "Return valid JSON only.\n\n"
+                    "Format:\n"
+                    "[\n"
+                    '  {"description": "...", '
+                    '"tools": ["..."]}\n'
+                    "]\n\n"
+                    f"Available capabilities:\n{capabilities_text}"
+                ),
+            },
+            {
+                "role": "user",
+                "content": user_request,
+            },
+        ]
+        # Planner has no `tools` request field: allowed schemas are embedded
+        # in its system message and counted as part of the serialized body.
+        request_size = serialized_request_size("deepseek-chat", messages)
+        if request_size > self.max_context_chars:
+            raise ContextBudgetExceeded(
+                "planner request exceeds configured size budget"
+            )
+
         response = self.client.chat.completions.create(
             model="deepseek-chat",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a task planner. "
-                        "Break the user's request into a small number "
-                        "of clear, executable steps.\n\n"
-                        "For every step, specify:\n"
-                        "1. description: what the step does\n"
-                        "2. tools: the names of tools or skills that "
-                        "can execute this step\n\n"
-                        "Only use tools or skills from the provided "
-                        "capability list.\n"
-                        "Return valid JSON only.\n\n"
-                        "Format:\n"
-                        "[\n"
-                        '  {"description": "...", '
-                        '"tools": ["..."]}\n'
-                        "]\n\n"
-                        f"Available capabilities:\n{capabilities_text}"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": user_request,
-                },
-            ],
+            messages=messages,
         )
 
         content = response.choices[0].message.content or ""

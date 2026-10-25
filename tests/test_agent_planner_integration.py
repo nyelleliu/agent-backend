@@ -1,7 +1,12 @@
+import ast
+from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.agent.loop import AgentLoop
+from app.agent.request_budget import DEFAULT_MAX_CONTEXT_CHARS
 from app.permissions.checker import PermissionChecker
+from app.planner.planner import Planner
 from app.planner.state import TaskState
 from app.tools.registry import ToolRegistry
 
@@ -152,6 +157,65 @@ def test_agent_does_not_inject_plan_when_planner_fails():
     agent.run(messages)
 
     assert messages[0] == {"role": "user", "content": "问题"}
+
+
+def test_agent_successful_plan_does_not_mutate_caller_history():
+    messages = [
+        {"role": "system", "content": "Keep security rules."},
+        {"role": "user", "content": "完成一个多步骤任务"},
+    ]
+    original = deepcopy(messages)
+    client = ScriptedClient()
+    agent = build_agent(RecordingPlanner(), client=client)
+
+    agent.run(messages)
+
+    assert messages == original
+    assert client.call_count == 2
+
+
+def test_application_wires_one_shared_context_budget_to_both_components():
+    source = Path(__file__).resolve().parents[1] / "main.py"
+    module = ast.parse(source.read_text(encoding="utf-8-sig"))
+    budget_assignment = next(
+        node for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "APP_MAX_CONTEXT_CHARS"
+            for target in node.targets
+        )
+    )
+    assert isinstance(budget_assignment.value, ast.Name)
+    assert budget_assignment.value.id == "DEFAULT_MAX_CONTEXT_CHARS"
+    assert DEFAULT_MAX_CONTEXT_CHARS == 24_000
+
+    constructor_budgets = {}
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in {"Planner", "AgentLoop"}:
+            continue
+        value = next(
+            keyword.value for keyword in node.keywords
+            if keyword.arg == "max_context_chars"
+        )
+        constructor_budgets[node.func.id] = value
+
+    assert isinstance(constructor_budgets["Planner"], ast.Name)
+    assert isinstance(constructor_budgets["AgentLoop"], ast.Name)
+    assert constructor_budgets["Planner"].id == "APP_MAX_CONTEXT_CHARS"
+    assert constructor_budgets["AgentLoop"].id == "APP_MAX_CONTEXT_CHARS"
+
+
+def test_planner_and_agent_loop_accept_same_non_default_budget():
+    budget = 1_700
+    client = ScriptedClient()
+    planner = Planner(client, max_context_chars=budget)
+    agent = build_agent(planner, client=client, max_context_chars=budget)
+
+    assert planner.max_context_chars == budget
+    assert agent.max_context_chars == budget
 
 
 def test_agent_skips_planner_for_greeting():

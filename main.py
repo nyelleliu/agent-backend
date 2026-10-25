@@ -23,6 +23,7 @@ import datetime
 import chromadb
 from app.tools import tool_registry
 from app.agent.loop import AgentLoop
+from app.agent.request_budget import DEFAULT_MAX_CONTEXT_CHARS
 from app.core.database import (
     build_database_url,
     create_engine_safely,
@@ -60,6 +61,7 @@ logger = logging.getLogger(__name__)
 LLM_TIMEOUT_SECONDS = 60.0
 LLM_MAX_RETRIES = 2
 MCP_TOOL_CALL_TIMEOUT_SECONDS = 30.0
+APP_MAX_CONTEXT_CHARS = DEFAULT_MAX_CONTEXT_CHARS
 
 
 def _read_bool_env(name: str, default: bool) -> bool:
@@ -225,6 +227,7 @@ planner = Planner(
     skill_registry=skill_registry,
     mcp_tool_registry=mcp_tool_registry,
     permission_checker=permission_checker,
+    max_context_chars=APP_MAX_CONTEXT_CHARS,
 )
 
 agent_loop = AgentLoop(
@@ -235,6 +238,7 @@ agent_loop = AgentLoop(
     planner=planner,
     task_state_class=TaskState,
     mcp_tool_registry=mcp_tool_registry,
+    max_context_chars=APP_MAX_CONTEXT_CHARS,
 )
 
 def build_redis_client():

@@ -6,6 +6,7 @@ it never touches a real model, database, or MCP subprocess.
 """
 
 from types import SimpleNamespace
+import copy
 
 from app.agent.loop import AgentLoop
 from app.mcp.tool_registry import MCPToolRegistry
@@ -84,12 +85,14 @@ class ScriptedClient:
     def __init__(self, tool_call):
         self.tool_call = tool_call
         self.call_count = 0
+        self.received_messages = []
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(create=self.create)
         )
 
     def create(self, **kwargs):
         self.call_count += 1
+        self.received_messages.append(copy.deepcopy(kwargs.get("messages", [])))
 
         if self.call_count == 1:
             message = SimpleNamespace(
@@ -103,6 +106,27 @@ class ScriptedClient:
             )
 
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+
+def assert_tool_reply_protocol(client, original_messages, expected_text):
+    assert len(client.received_messages) == 2
+    assert client.received_messages[0][0] == original_messages[0]
+    assert client.received_messages[1][0] == original_messages[0]
+    request = client.received_messages[1]
+    assistant_index = next(
+        index
+        for index, message in enumerate(request)
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assistant_message = request[assistant_index]
+    tool_message = request[assistant_index + 1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == assistant_message["tool_calls"][0]["id"]
+    assert expected_text in tool_message["content"]
+    assert AgentLoop._is_error_result(tool_message["content"]) is (
+        "Permission denied" in expected_text
+    )
+    return tool_message
 
 
 class FakeMCPRegistry:
@@ -168,16 +192,19 @@ def test_unauthorized_skill_returns_permission_denied_message():
         tool_registry=ToolRegistry(),
         skill_registry=registry,
         permission_checker=PermissionChecker(),
-        max_steps=1,
+        max_steps=2,
     )
 
     messages = [{"role": "user", "content": "分析数据"}]
+    original_messages = copy.deepcopy(messages)
     agent.run(messages, role="employee")
 
-    tool_message = messages[-1]
-    assert tool_message["role"] == "tool"
-    assert "Permission denied" in tool_message["content"]
-    assert AgentLoop._is_error_result(tool_message["content"]) is True
+    assert messages == original_messages
+    tool_message = assert_tool_reply_protocol(
+        agent.client, original_messages, "Permission denied"
+    )
+    assert "data_analysis" in tool_message["content"]
+    assert skill.executed is False
 
 
 def test_finance_can_execute_authorized_skill():
@@ -208,55 +235,70 @@ def test_unregistered_mcp_tool_is_not_executed():
     checker = PermissionChecker()
 
     for role in ("employee", "finance", "admin"):
+        client = ScriptedClient(FakeToolCall("delete_everything"))
         agent = AgentLoop(
-            client=ScriptedClient(FakeToolCall("delete_everything")),
+            client=client,
             tool_registry=ToolRegistry(),
             mcp_tool_registry=mcp,
             permission_checker=checker,
-            max_steps=1,
+            max_steps=2,
         )
 
         messages = [{"role": "user", "content": "do it"}]
+        original_messages = copy.deepcopy(messages)
         agent.run(messages, role=role)
 
         assert mcp.executed == []
-        assert "Permission denied" in messages[-1]["content"]
+        assert messages == original_messages
+        tool_message = assert_tool_reply_protocol(
+            client, original_messages, "Permission denied"
+        )
+        assert "delete_everything" in tool_message["content"]
 
 
 def test_authorized_mcp_tool_is_executed():
     mcp = FakeMCPRegistry(name="get_company_info")
+    client = ScriptedClient(FakeToolCall("get_company_info"))
 
     agent = AgentLoop(
-        client=ScriptedClient(FakeToolCall("get_company_info")),
+        client=client,
         tool_registry=ToolRegistry(),
         mcp_tool_registry=mcp,
         permission_checker=PermissionChecker(),
-        max_steps=1,
+        max_steps=2,
     )
 
     messages = [{"role": "user", "content": "查询公司信息"}]
+    original_messages = copy.deepcopy(messages)
     agent.run(messages, role="employee")
 
     assert mcp.executed == [("get_company_info", {})]
-    assert messages[-1]["content"] == "mcp result"
+    assert messages == original_messages
+    assert_tool_reply_protocol(client, original_messages, "mcp result")
 
 
 def test_missing_permission_checker_denies_mcp_tool():
     mcp = FakeMCPRegistry(name="get_company_info")
+    client = ScriptedClient(FakeToolCall("get_company_info"))
 
     agent = AgentLoop(
-        client=ScriptedClient(FakeToolCall("get_company_info")),
+        client=client,
         tool_registry=ToolRegistry(),
         mcp_tool_registry=mcp,
         permission_checker=None,
-        max_steps=1,
+        max_steps=2,
     )
 
     messages = [{"role": "user", "content": "查询公司信息"}]
+    original_messages = copy.deepcopy(messages)
     agent.run(messages, role="admin")
 
     assert mcp.executed == []
-    assert "Permission denied" in messages[-1]["content"]
+    assert messages == original_messages
+    tool_message = assert_tool_reply_protocol(
+        client, original_messages, "Permission denied"
+    )
+    assert "get_company_info" in tool_message["content"]
 
 
 def test_missing_permission_checker_denies_base_tool():
@@ -269,19 +311,25 @@ def test_missing_permission_checker_denies_base_tool():
     tool = RecordingTool()
     registry = ToolRegistry()
     registry.register(tool)
+    client = ScriptedClient(FakeToolCall("deploy_production"))
 
     agent = AgentLoop(
-        client=ScriptedClient(FakeToolCall("deploy_production")),
+        client=client,
         tool_registry=registry,
         permission_checker=None,
-        max_steps=1,
+        max_steps=2,
     )
 
     messages = [{"role": "user", "content": "deploy production"}]
+    original_messages = copy.deepcopy(messages)
     agent.run(messages, role="admin")
 
     assert tool.executed is False
-    assert "Permission denied" in messages[-1]["content"]
+    assert messages == original_messages
+    tool_message = assert_tool_reply_protocol(
+        client, original_messages, "Permission denied"
+    )
+    assert "deploy_production" in tool_message["content"]
 
 
 def test_missing_permission_checker_denies_skill():
@@ -293,21 +341,27 @@ def test_missing_permission_checker_denies_skill():
     registry = SkillRegistry()
     registry.register(skill)
 
+    client = ScriptedClient(
+        FakeToolCall("knowledge_search", '{"query": "policy"}')
+    )
     agent = AgentLoop(
-        client=ScriptedClient(
-            FakeToolCall("knowledge_search", '{"query": "policy"}')
-        ),
+        client=client,
         tool_registry=ToolRegistry(),
         skill_registry=registry,
         permission_checker=None,
-        max_steps=1,
+        max_steps=2,
     )
 
     messages = [{"role": "user", "content": "search the policy"}]
+    original_messages = copy.deepcopy(messages)
     agent.run(messages, role="admin")
 
     assert skill.executed is False
-    assert "Permission denied" in messages[-1]["content"]
+    assert messages == original_messages
+    tool_message = assert_tool_reply_protocol(
+        client, original_messages, "Permission denied"
+    )
+    assert "knowledge_search" in tool_message["content"]
 
 
 def test_model_cannot_override_role_via_skill_arguments():
@@ -339,19 +393,25 @@ def test_unauthorized_base_tool_is_not_executed():
     tool = RecordingTool()
     registry = ToolRegistry()
     registry.register(tool)
+    client = ScriptedClient(FakeToolCall("deploy_production"))
 
     agent = AgentLoop(
-        client=ScriptedClient(FakeToolCall("deploy_production")),
+        client=client,
         tool_registry=registry,
         permission_checker=PermissionChecker(),
-        max_steps=1,
+        max_steps=2,
     )
 
     messages = [{"role": "user", "content": "deploy"}]
+    original_messages = copy.deepcopy(messages)
     agent.run(messages, role="employee")
 
     assert tool.executed is False
-    assert "Permission denied" in messages[-1]["content"]
+    assert messages == original_messages
+    tool_message = assert_tool_reply_protocol(
+        client, original_messages, "Permission denied"
+    )
+    assert "deploy_production" in tool_message["content"]
 
 
 def test_authorized_base_tool_is_executed():
@@ -360,19 +420,22 @@ def test_authorized_base_tool_is_executed():
     registry = ToolRegistry()
     registry.register(CalculatorTool())
 
+    client = ScriptedClient(
+        FakeToolCall("calculate", '{"expression": "2 + 2"}')
+    )
     agent = AgentLoop(
-        client=ScriptedClient(
-            FakeToolCall("calculate", '{"expression": "2 + 2"}')
-        ),
+        client=client,
         tool_registry=registry,
         permission_checker=PermissionChecker(),
-        max_steps=1,
+        max_steps=2,
     )
 
     messages = [{"role": "user", "content": "2+2"}]
+    original_messages = copy.deepcopy(messages)
     agent.run(messages, role="employee")
 
-    assert messages[-1]["content"] == "4"
+    assert messages == original_messages
+    assert_tool_reply_protocol(client, original_messages, "4")
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,7 @@
 ﻿from types import SimpleNamespace
 
+import copy
+
 from app.agent.loop import AgentLoop
 from app.permissions.checker import PermissionChecker
 from app.planner.state import TaskState
@@ -60,6 +62,7 @@ class FakeResponse:
 class FakeClient:
     def __init__(self):
         self.call_count = 0
+        self.received_messages = []
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(
                 create=self.create
@@ -68,6 +71,7 @@ class FakeClient:
 
     def create(self, **kwargs):
         self.call_count += 1
+        self.received_messages.append(copy.deepcopy(kwargs.get("messages", [])))
 
         if self.call_count == 1:
             return FakeResponse(FakeMessageWithTool())
@@ -96,11 +100,29 @@ def test_agent_updates_task_state():
         }
     ]
 
-    reply, _ = agent.run(messages)
+    original_messages = copy.deepcopy(messages)
+    reply, task_state = agent.run(messages)
 
     assert reply == "计算结果是 120"
+    assert messages == original_messages
+    assert task_state is not None
+    assert task_state.steps[0].status == "completed"
+    assert task_state.steps[1].status == "pending"
+    assert client.call_count == 2
 
-    plan_message = messages[0]["content"]
+    second_request = client.received_messages[1]
+    assistant_index = next(
+        index
+        for index, message in enumerate(second_request)
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    )
+    assistant_message = second_request[assistant_index]
+    tool_message = second_request[assistant_index + 1]
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == assistant_message["tool_calls"][0]["id"]
+    assert "120" in tool_message["content"]
+
+    plan_message = client.received_messages[0][0]["content"]
 
     assert "[pending] 执行计算" in plan_message
     assert "[pending] 完成任务" in plan_message

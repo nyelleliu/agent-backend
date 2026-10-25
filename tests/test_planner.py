@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.agent.request_budget import ContextBudgetExceeded, serialized_request_size
 from app.permissions.checker import PermissionChecker
 from app.planner.planner import Planner
 
@@ -260,3 +261,58 @@ def test_planner_drops_unauthorized_but_registered_tools():
             "tools": ["calculate"],
         }
     ]
+
+
+class RecordingPlanClient:
+    def __init__(self):
+        self.calls = []
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self.create)
+        )
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="[]")
+                )
+            ]
+        )
+
+
+def test_planner_sends_normal_budgeted_request():
+    client = RecordingPlanClient()
+    planner = Planner(client, max_context_chars=1000)
+
+    assert planner.create_plan("summarize this", role="admin") == []
+
+    assert len(client.calls) == 1
+    request = client.calls[0]
+    assert set(request) == {"model", "messages"}
+    assert request["model"] == "deepseek-chat"
+    assert serialized_request_size(
+        request["model"],
+        request["messages"],
+    ) <= 1000
+
+
+def test_planner_schema_over_budget_rejects_before_fake_client_call():
+    class LargeDescriptionRegistry(FakeRegistry):
+        def schemas(self):
+            schemas = super().schemas()
+            schemas[0]["function"]["description"] = "x" * 1400
+            return schemas
+
+    client = RecordingPlanClient()
+    planner = Planner(
+        client,
+        tool_registry=LargeDescriptionRegistry(["data_analysis"]),
+        permission_checker=PermissionChecker(),
+        max_context_chars=1000,
+    )
+
+    with pytest.raises(ContextBudgetExceeded, match="planner request"):
+        planner.create_plan("summarize this", role="admin")
+
+    assert client.calls == []
