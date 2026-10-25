@@ -61,6 +61,29 @@ LLM_TIMEOUT_SECONDS = 60.0
 LLM_MAX_RETRIES = 2
 MCP_TOOL_CALL_TIMEOUT_SECONDS = 30.0
 
+
+def _read_bool_env(name: str, default: bool) -> bool:
+    """Read a boolean environment variable without truthy-string guessing."""
+    raw_value = os.getenv(name)
+
+    if raw_value is None:
+        return default
+
+    normalized = raw_value.strip().lower()
+
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    raise ValueError(
+        f"{name} must be a boolean value (true/false, 1/0, yes/no, on/off)"
+    )
+
+
+MCP_AUTO_REFRESH = _read_bool_env("MCP_AUTO_REFRESH", default=False)
+
 BCRYPT_MAX_PASSWORD_BYTES = 72
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_SECONDS = 300.0
@@ -168,7 +191,13 @@ client = OpenAI(
 permission_checker = PermissionChecker()
 
 
-chroma_client = chromadb.PersistentClient(path="./chroma_data")
+CHROMA_PERSIST_DIRECTORY = os.getenv(
+    "CHROMA_PERSIST_DIRECTORY",
+    "./chroma_data",
+)
+chroma_client = chromadb.PersistentClient(
+    path=CHROMA_PERSIST_DIRECTORY,
+)
 collection = chroma_client.get_or_create_collection(name="my_docs")
 
 skill_registry.register(KnowledgeSearchSkill(collection, tool_registry))
@@ -182,12 +211,13 @@ mcp_client = MCPClient(
 )
 mcp_tool_registry = MCPToolRegistry(mcp_client)
 
-try:
-    mcp_tool_registry.refresh()
-except Exception:
-    logger.exception(
-        "mcp_refresh_failed: continuing without MCP tools"
-    )
+if MCP_AUTO_REFRESH:
+    try:
+        mcp_tool_registry.refresh()
+    except Exception:
+        logger.exception(
+            "mcp_refresh_failed: continuing without MCP tools"
+        )
 
 planner = Planner(
     client=client,
@@ -248,6 +278,7 @@ if len(SECRET_KEY.encode("utf-8")) < 32:
 MYSQL_USER = os.getenv("MYSQL_USER", "root")
 MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
 MYSQL_PORT = os.getenv("MYSQL_PORT", "3306")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "agent_db")
 
 # Built and created through app.core.database so that a missing DB
 # driver or an unparseable DSN fails with a classified, secret-free
@@ -262,6 +293,7 @@ engine = create_engine_safely(
         os.environ["MYSQL_PASSWORD"],
         MYSQL_HOST,
         MYSQL_PORT,
+        database=MYSQL_DATABASE,
     ),
     pool_pre_ping=True,
     pool_size=10,

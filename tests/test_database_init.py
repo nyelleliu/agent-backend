@@ -41,6 +41,28 @@ def test_password_with_special_characters_survives_the_url_round_trip():
     assert FAKE_PASSWORD not in url.split("@", 1)[0]
 
 
+def test_database_name_defaults_to_agent_db():
+    url = build_database_url("root", FAKE_PASSWORD, "db.internal", "3306")
+
+    assert make_url(url).database == "agent_db"
+    assert FAKE_PASSWORD not in url.split("@", 1)[0]
+
+
+def test_database_name_can_be_configured_without_connecting():
+    url = build_database_url(
+        "root",
+        FAKE_PASSWORD,
+        "db.internal",
+        "3306",
+        database="agent_backend_dev",
+    )
+
+    parsed = make_url(url)
+    assert parsed.database == "agent_backend_dev"
+    assert parsed.password == FAKE_PASSWORD
+    assert FAKE_PASSWORD not in url.split("@", 1)[0]
+
+
 def test_build_database_url_encodes_the_username_too():
     url = build_database_url("ro@ot/x", "pw", "db.internal", "3306")
 
