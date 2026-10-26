@@ -51,10 +51,11 @@ class FakeMessage:
 class FakeSummary:
     user_id = FakeColumn("user_id")
 
-    def __init__(self, summary_text, covers_up_to_message_id):
+    def __init__(self, summary_text, covers_up_to_message_id, version=0):
         self.summary_text = summary_text
         self.covers_up_to_message_id = covers_up_to_message_id
         self.user_id = "1"
+        self.version = version
 
 
 class FakeQuery:
