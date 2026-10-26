@@ -14,7 +14,10 @@ class ToolRegistryTests(unittest.TestCase):
 
     def test_default_registry_has_existing_tools(self):
         names = {schema["function"]["name"] for schema in tool_registry.schemas()}
-        self.assertEqual(names, {"get_current_time", "calculate"})
+        self.assertEqual(
+            names,
+            {"get_current_time", "calculate", "calculate_travel_budget"},
+        )
 
     def test_execute_by_name_without_if_elif(self):
         result = self.registry.execute("calculate", '{"expression": "23 * 47"}')

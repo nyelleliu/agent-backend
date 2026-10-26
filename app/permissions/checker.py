@@ -4,18 +4,21 @@
             "knowledge_search",
             "calculate",
             "get_current_time",
+            "calculate_travel_budget",
         },
         "finance": {
             "knowledge_search",
             "calculate",
             "get_current_time",
             "data_analysis",
+            "calculate_travel_budget",
         },
         "admin": {
             "knowledge_search",
             "calculate",
             "get_current_time",
             "data_analysis",
+            "calculate_travel_budget",
         },
     }
 
