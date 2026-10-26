@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import evals.run_agent_loop_eval as eval_module
 from evals.run_agent_loop_eval import (
     ScriptedFakeClient,
     _response,
@@ -34,10 +35,48 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_offline_agent_loop_evaluation_cases_pass_real_execution_checks():
     report = run_evaluation()
 
-    assert report["cases"] == 11
-    assert report["passed"] == 11
+    assert report["cases"] == 12
+    assert report["passed"] == 12
     assert report["failed"] == 0
     assert all(result["task_success"] for result in report["results"])
+    invalid = next(result for result in report["results"] if result["case_id"] == "invalid_tool_call_rejected")
+    assert invalid["result_category"] == "invalid_tool_call"
+    assert invalid["tool_execution_count"] == 0
+    assert invalid["llm_call_attempt_count"] == 1
+
+
+def test_invalid_tool_call_is_rejected_and_category_requires_all_assertions(monkeypatch):
+    case = next(
+        case for case in _scenario_definitions()
+        if case["case_id"] == "invalid_tool_call_rejected"
+    )
+    observed = {}
+    original_assert_case = eval_module._assert_case
+
+    def record_actual_execution(case, reply, messages, metrics, client):
+        observed["reply"] = reply
+        observed["messages"] = copy.deepcopy(messages)
+        observed["tool_execution_count"] = metrics.tool_execution_count
+        observed["executed_tool_calls"] = copy.deepcopy(metrics.tool_calls)
+        observed["llm_call_attempt_count"] = client.create_call_attempt_count
+        original_assert_case(case, reply, messages, metrics, client)
+
+    monkeypatch.setattr(eval_module, "_assert_case", record_actual_execution)
+    result = run_case(case)
+
+    assert result["task_success"] is True
+    assert result["result_category"] == "invalid_tool_call"
+    assert observed["tool_execution_count"] == result["tool_execution_count"] == 0
+    assert observed["executed_tool_calls"] == result["tool_calls"] == []
+    assert observed["llm_call_attempt_count"] == result["llm_call_attempt_count"] == 1
+    assert [message for message in observed["messages"] if message.get("role") == "tool"] == []
+    assert observed["reply"] == "Error: agent tool calls are invalid; unable to continue safely."
+
+    broken = copy.deepcopy(case)
+    broken["expected"]["reply_equals"] = "wrong reply"
+    failed = run_case(broken)
+    assert failed["task_success"] is False
+    assert failed["result_category"] is None
 
 
 def test_metrics_capture_tool_calls_permissions_budget_and_fake_usage():
@@ -95,13 +134,27 @@ def test_wrong_expected_result_fails_under_python_optimization():
         "raise SystemExit(0 if (not result['task_success'] and "
         "'expected 1499' in result['failure_reason']) else 1)"
     )
-    completed = subprocess.run(
-        [sys.executable, "-O", "-c", code],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-O", "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        pytest.fail(
+            "optimized evaluation subprocess exceeded 30 seconds; "
+            f"partial stdout={stdout!r}; partial stderr={stderr!r}",
+            pytrace=False,
+        )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert '"task_success": false' in completed.stdout
@@ -288,7 +341,7 @@ def _live_test_case(turns):
     return {"case_id": "live_test", "role": "employee", "turns": turns}
 
 
-def test_default_entry_remains_offline_even_when_api_key_is_present(monkeypatch):
+def test_default_entry_remains_offline_even_when_api_key_is_present(monkeypatch, capsys):
     monkeypatch.setenv("AGENT_EVAL_API_KEY", "must-not-be-used")
     monkeypatch.setattr(sys, "argv", ["run_agent_loop_eval.py"])
     monkeypatch.setattr(
@@ -297,6 +350,9 @@ def test_default_entry_remains_offline_even_when_api_key_is_present(monkeypatch)
     )
 
     assert eval_main() == 0
+    report = json.loads(capsys.readouterr().out)
+    invalid = next(result for result in report["results"] if result["case_id"] == "invalid_tool_call_rejected")
+    assert invalid["result_category"] == "invalid_tool_call"
 
 
 def test_without_live_switch_or_missing_key_never_constructs_live_client(monkeypatch):

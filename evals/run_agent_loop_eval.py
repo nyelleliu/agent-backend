@@ -1,6 +1,7 @@
 """Offline AgentLoop evaluation with scripted, usage-aware fake responses."""
 from __future__ import annotations
 
+import copy
 import json
 import argparse
 import logging
@@ -89,6 +90,7 @@ def _validate_live_endpoint(endpoint: str, allow_custom_endpoint: bool) -> str:
 class CaseMetrics:
     case_id: str
     task_success: bool = False
+    result_category: str | None = None
     tool_execution_count: int = 0
     llm_call_attempt_count: int = 0
     duration_ms: float = 0.0
@@ -159,13 +161,19 @@ class ScriptedFakeClient:
         self.usage_errors: list[str | None] = []
         self.issued_tool_calls: list[dict[str, Any]] = []
         self.received_messages: list[list[dict[str, Any]]] = []
+        self.message_traces: list[list[dict[str, Any]]] = []
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(create=self.create)
         )
 
     def create(self, **kwargs):
         self.create_call_attempt_count += 1
-        self.received_messages.append([dict(message) for message in kwargs.get("messages", [])])
+        request_messages = kwargs.get("messages", [])
+        self.received_messages.append(copy.deepcopy(request_messages))
+        # Retain the AgentLoop's working list as a trace. The caller's input
+        # history is isolated; AgentLoop appends assistant/tool exchanges to
+        # this internal list after the Fake Client returns its response.
+        self.message_traces.append(request_messages)
         response_index = self.create_call_attempt_count - 1
         if response_index >= len(self._responses):
             raise RuntimeError("fake client ran out of scripted responses")
@@ -357,6 +365,28 @@ def _scenario_definitions():
                 "reply_contains": ["tool-call budget exceeded"],
             },
         },
+        {
+            "case_id": "invalid_tool_call_rejected",
+            "role": "employee",
+            "responses": [
+                _response(tool_calls=[_call(
+                    {"city": "上海", "days": 1, "job_level": "employee"},
+                    call_id=" ",
+                )]),
+            ],
+            "expected": {
+                "tool_execution_count": 0,
+                "llm_call_attempt_count": 1,
+                "issued_tool_calls": [{
+                    "name": travel_name,
+                    "arguments": {"city": "上海", "days": 1, "job_level": "employee"},
+                }],
+                "executed_tool_calls": [],
+                "tool_message_count": 0,
+                "reply_equals": "Error: agent tool calls are invalid; unable to continue safely.",
+            },
+            "result_category": "invalid_tool_call",
+        },
     ]
 
 
@@ -421,9 +451,87 @@ def _require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def _validate_tool_message_protocol(
+    messages: list[dict[str, Any]],
+    *,
+    allow_incomplete_terminal_group: bool = False,
+    context: str = "request",
+) -> None:
+    """Validate assistant tool calls and their ordered tool replies."""
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        _require(isinstance(message, dict), f"{context}: message must be an object")
+
+        if message.get("role") == "tool":
+            raise AssertionError(f"{context}: orphan tool reply at message {index}")
+
+        calls = message.get("tool_calls")
+        if not calls:
+            index += 1
+            continue
+
+        _require(
+            message.get("role") == "assistant" and isinstance(calls, list),
+            f"{context}: tool_calls must belong to an assistant message",
+        )
+        call_ids = [
+            call.get("id") if isinstance(call, dict) else None
+            for call in calls
+        ]
+        _require(
+            all(isinstance(call_id, str) and call_id for call_id in call_ids),
+            f"{context}: tool call id is missing",
+        )
+        _require(
+            len(set(call_ids)) == len(call_ids),
+            f"{context}: duplicate tool call id",
+        )
+
+        response_start = index + 1
+        response_end = response_start + len(call_ids)
+        responses = messages[response_start:response_end]
+        if len(responses) < len(call_ids):
+            terminal = response_end >= len(messages)
+            _require(
+                allow_incomplete_terminal_group and terminal,
+                f"{context}: tool call is missing a reply",
+            )
+
+        for call_id, response in zip(call_ids, responses):
+            _require(
+                isinstance(response, dict)
+                and response.get("role") == "tool"
+                and response.get("tool_call_id") == call_id,
+                f"{context}: tool reply does not match call id {call_id!r}",
+            )
+
+        if len(responses) < len(call_ids):
+            return
+        index = response_end
+
+
+def _validate_client_request_protocol(client: ScriptedFakeClient, context: str) -> None:
+    for request_index, messages in enumerate(client.received_messages):
+        _validate_tool_message_protocol(
+            messages,
+            context=f"{context} request {request_index + 1}",
+        )
+
+
+def _working_message_trace(client: ScriptedFakeClient) -> list[dict[str, Any]]:
+    return client.message_traces[-1] if client.message_traces else []
+
+
 def _assert_case(case, reply, messages, metrics, client):
     expected = case["expected"]
     tool_messages = _tool_messages(messages)
+    _validate_client_request_protocol(client, case["case_id"])
+    _validate_tool_message_protocol(
+        messages,
+        allow_incomplete_terminal_group=True,
+        context=f"{case['case_id']} execution trace",
+    )
     executed_calls = [
         {"name": call["name"], "arguments": call["arguments"]}
         for call in metrics.tool_calls
@@ -476,6 +584,9 @@ def _assert_case(case, reply, messages, metrics, client):
 
     for text in expected.get("reply_contains", []):
         _require(text in reply, f"final reply did not contain {text!r}: {reply!r}")
+    if "reply_equals" in expected:
+        _require(reply == expected["reply_equals"],
+                 f"final reply expected {expected['reply_equals']!r}, got {reply!r}")
 
 
 def _validate_turn(turn, reply, messages, metrics, client, input_messages, history_before):
@@ -491,7 +602,14 @@ def _validate_turn(turn, reply, messages, metrics, client, input_messages, histo
         )
 
     expected = turn["expected"]
-    tool_messages = _tool_messages(messages[len(history_before):])
+    _validate_client_request_protocol(client, turn["turn_id"])
+    execution_messages = _working_message_trace(client)
+    _validate_tool_message_protocol(
+        execution_messages,
+        allow_incomplete_terminal_group=True,
+        context=f"{turn['turn_id']} execution trace",
+    )
+    tool_messages = _tool_messages(execution_messages)
     executed_calls = [
         {"name": call["name"], "arguments": call["arguments"]}
         for call in metrics.tool_calls
@@ -563,11 +681,17 @@ def run_case(case: dict[str, Any]) -> dict[str, Any]:
         max_tool_calls=case.get("max_tool_calls", 12),
     )
     messages = [{"role": "user", "content": case["case_id"]}]
+    input_messages = copy.deepcopy(messages)
     started = time.perf_counter()
     try:
         reply, _task_state = agent.run(messages, role=case["role"])
         metrics.duration_ms = round((time.perf_counter() - started) * 1000, 3)
-        _assert_case(case, reply, messages, metrics, client)
+        _require(
+            messages == input_messages,
+            f"{case['case_id']}: AgentLoop modified caller history",
+        )
+        _assert_case(case, reply, _working_message_trace(client), metrics, client)
+        metrics.result_category = case.get("result_category")
         metrics.task_success = True
     except Exception as exc:
         metrics.failure_reason = f"{type(exc).__name__}: {exc}"
@@ -598,13 +722,17 @@ def _run_multiturn_case(case: dict[str, Any]) -> dict[str, Any]:
             max_tool_calls=case.get("max_tool_calls", 12),
         )
         messages.append({"role": "user", "content": turn["user_message"]})
-        input_messages = [dict(message) for message in messages]
-        history_before = [dict(message) for message in messages[:-1]]
+        input_messages = copy.deepcopy(messages)
+        history_before = copy.deepcopy(messages[:-1])
         started = time.perf_counter()
         reply = None
         try:
             reply, _task_state = agent.run(messages, role=case["role"])
             turn_metrics.duration_ms = round((time.perf_counter() - started) * 1000, 3)
+            _require(
+                messages == input_messages,
+                f"turn {turn['turn_id']}: AgentLoop modified caller history",
+            )
             _validate_turn(turn, reply, messages, turn_metrics, client, input_messages, history_before)
             turn_metrics.task_success = True
         except Exception as exc:
@@ -617,7 +745,10 @@ def _run_multiturn_case(case: dict[str, Any]) -> dict[str, Any]:
             turn_result = asdict(turn_metrics)
             turn_result["issued_tool_calls"] = list(client.issued_tool_calls)
             turn_result["history_before"] = input_messages
-            turn_result["tool_messages"] = [dict(message) for message in _tool_messages(messages[len(input_messages):])]
+            turn_result["tool_messages"] = [
+                dict(message)
+                for message in _tool_messages(_working_message_trace(client))
+            ]
             turn_result["reply"] = reply
             turn_result["user_message"] = turn["user_message"]
             turn_results.append(turn_result)
@@ -1135,6 +1266,7 @@ def main() -> int:
             "tool_execution_count": result["tool_execution_count"],
             "llm_call_attempt_count": result["llm_call_attempt_count"],
             "failure_reason": result["failure_reason"],
+            "result_category": result["result_category"],
         }
         if "turns" in result:
             item["turns"] = [
