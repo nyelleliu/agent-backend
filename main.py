@@ -333,6 +333,15 @@ class ConversationSummary(Base):
     user_id = Column(String(50), unique=True)
     summary_text = Column(Text)
     covers_up_to_message_id = Column(Integer)
+    pending_message_id = Column(Integer)
+    pending_content_hash = Column(String(64))
+    pending_offset = Column(Integer, nullable=False, default=0)
+    pending_summary_text = Column(Text)
+    failure_count = Column(Integer, nullable=False, default=0)
+    next_retry_at = Column(DateTime)
+    failure_status = Column(String(20))
+    failure_code = Column(String(64))
+    version = Column(Integer, nullable=False, default=0)
 
 
 COMPRESSION_THRESHOLD = 20
@@ -362,6 +371,7 @@ memory_manager = MemoryManager(
     client,
     Message,
     ConversationSummary,
+    max_context_chars=APP_MAX_CONTEXT_CHARS,
 )
 
 
