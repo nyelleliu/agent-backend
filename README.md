@@ -1,761 +1,250 @@
 # Agent Backend
 
-企业内部智能查询 Agent 后端项目。
+一个面向企业内部知识问答和受权限约束工具调用的 AI Agent 后端练习项目。项目用 FastAPI 提供 API，以 AgentLoop 编排模型、Tool、Skill、MCP 与 RAG，并用 MySQL、Redis 和 Chroma 保存业务状态、对话摘要及知识文档。
 
-项目目标：构建一个具备 **Tool Calling、Skill、RAG、Memory、MCP、权限控制、多用户隔离**能力的企业级 Agent 后端，并通过实际工程代码学习 Agent 的核心架构。
+> **验证范围：** 本文描述当前 `main` 中的源码与评测文件，不代表本次 README 更新运行过测试、真实 LLM 评测或生产部署。离线 Fake Client 结果只代表预设响应下的流程检查；已记录的评测结果见“测试与评测”一节。
 
-> 当前状态：核心 Agent 能力已经基本搭建完成，RAG 检索链路为「智能切分 → 结构化元数据 → 混合召回 → 重排 → 带引用回答」，Planner / TaskState 已完整接入 AgentLoop 并带失败降级与角色过滤，RAG 有独立评测集。历史全量验证记录（2026-10-19）：**368 项，368 passed / 0 failed / 0 skipped / 5 warnings**（本机 Python 3.13 执行 `python -m pytest -q`；这不是当前测试总数，详见第 10 节）。下一阶段重点是 Agent + Memory 深度结合与检索质量进阶（BM25 / Cross-Encoder）。
+## 项目能力
 
----
+- 多轮 AgentLoop、可选 Planner 和 TaskState 状态回传。
+- Tool、Skill、MCP 统一以 schema 提供给模型，并在执行前按角色复核权限。
+- RAG 文档切分、向量与关键词混合召回、重排、编号引用及文档级权限过滤。
+- 用户级对话历史和摘要；Redis 缓存失败时从数据库回退。
+- 差旅预算模拟工具，校验必填字段、城市、天数、职级和费用，并返回计算明细。
+- 注册登录、JWT、速率限制、错误信息脱敏、请求 ID 和风险日志。
 
-## 0. 快速开始
+本项目是学习和面试演示用的后端原型，不是已验证的生产系统。差旅标准为模拟数据，不代表真实企业政策。
 
-```bash
-pip install -r requirements.txt
-```
+## 技术栈
 
-`.env` 必需配置：
+Python 3.13、FastAPI、Pydantic、OpenAI Python SDK（连接 DeepSeek API）、SQLAlchemy、MySQL、Redis、Chroma、MCP Python SDK、PyJWT、bcrypt、pytest。
 
-```text
-DEEPSEEK_API_KEY=...
-MYSQL_PASSWORD=...
-JWT_SECRET_KEY=...
-LOG_LEVEL=INFO
-```
+依赖版本见 [`requirements.txt`](requirements.txt)。
 
-可选配置：
+## 架构与执行流程
 
 ```text
-MYSQL_HOST=localhost        # 默认 localhost，Docker 内部填 mysql
-MYSQL_PORT=3306
+HTTP request
+    ↓
+FastAPI authentication / rate limit / database user role
+    ↓
+MemoryManager loads user history
+    ↓
+API layer injects system prompt
+    ↓
+Planner (optional) creates a role-filtered plan
+    ↓
+AgentLoop offers role-filtered schemas to the model
+    ↓
+model tool call → execution-time permission check → Tool / Skill / MCP
+    ↓
+tool result returns to model → final reply + optional TaskState
+    ↓
+persist messages → best-effort summary compression → Redis cache
+```
+
+### AgentLoop、Planner 与 TaskState
+
+`/chat` 将认证用户的角色和历史消息传给 AgentLoop。普通请求可先交给 Planner；Planner 只向模型提供当前角色获准的能力，解析并校验 JSON 计划，过滤未授权能力。若 Planner 请求超过预算，`ContextBudgetExceeded` 会使 AgentLoop 在后续模型调用前返回预算错误并终止当前请求；普通 Planner 异常或无效计划则记录降级并继续无计划流程。
+
+计划作为引导上下文加入消息。AgentLoop 向 LLM 提交可用工具 schema；模型决定是否发起调用。AgentLoop 按工具名将调用映射到 TaskState 步骤，记录 running、completed、failed 与 retry_count，并把工具结果反馈给模型。最终答案和计划状态由 `/chat` 返回（通过 `include_plan` 请求状态）。TaskState 是执行过程状态记录，不是独立调度器，也不保证计划中的每一步都会被模型执行。
+
+AgentLoop 默认最多 5 次模型循环；存在计划时循环上限会按计划长度放宽，并限制最多 12 次工具调用。Planner 和 AgentLoop 的应用实例都由 `main.py` 的 `APP_MAX_CONTEXT_CHARS` 接收同一个预算值，当前赋值为共享默认值 24,000 字符；这个常量不是读取 `.env` 的 `APP_MAX_CONTEXT_CHARS` 环境变量。组件单独实例化仍可传入 `max_context_chars`，小于 1,000 的值会按共享下限提升至 1,000。
+
+预算按紧凑 JSON 请求体的字符数计量：`json.dumps(..., ensure_ascii=True, separators=(",", ":"), allow_nan=False)`。Planner 检查 `model` 与 `messages`；其能力 schema 嵌在 system message 中，没有独立 `tools` 字段。AgentLoop 检查 `model`、`messages` 和实际发送的 `tools` schema。AgentLoop 按完整消息结构裁剪较旧的可选历史组，保留 system 消息、当前用户请求和完整的 assistant tool call/tool result 组；畸形工具历史或必需上下文仍超限时，在模型请求前拒绝。Planner 超限也在其模型调用前抛出预算异常。此字符预算不等于模型 Token 数，也未通过供应商在线请求限制验证；它只覆盖上述 Planner 与 AgentLoop 请求路径。
+
+### Tool、Skill、MCP 与权限
+
+- Tool 通过 `ToolRegistry` 注册；当前默认工具包括 calculator、current time 和差旅预算。
+- Skill 通过 `SkillRegistry` 注册；主要能力是 `knowledge_search` 和 `data_analysis`。
+- MCP server 工具由 `MCPToolRegistry` 发现，经 Adapter 转成模型函数 schema，再由 MCPClient 通过 stdio 会话调用。内置示例 server 位于 `app/mcp_server.py`。
+- AgentLoop 向模型展示能力前按角色过滤，并在每次执行前再次检查；未配置 PermissionChecker 时默认不展示、不执行。动态 MCP 工具使用单独的显式 allow-list，未列入的工具对所有角色拒绝。
+
+当前规则概览：
+
+| 角色 | 应用能力 | 可检索文档级别 | MCP |
+|---|---|---|---|
+| employee | knowledge_search、calculate、get_current_time、calculate_travel_budget | public、employee | `get_company_info` |
+| finance | employee 能力及 data_analysis | public、employee、finance | `get_company_info` |
+| admin | finance 级应用能力 | public、employee、finance、admin | `get_company_info` |
+
+差旅工具限制为 employee、finance、admin 角色可用，但它只使用本地写定的模拟政策金额；当前没有真实报销系统集成。
+
+`PermissionChecker` 对未知角色不给予 Tool/Skill 能力；动态发现的 MCP 工具必须出现在显式 allow-list 中，否则所有角色默认拒绝。缺少 AgentLoop 权限检查器时也拒绝执行。文档级别为 `public`、`employee`、`finance`、`admin`；上传接口通过枚举校验拒绝其他级别，上传者还必须有权写入该级别。文档检索先按角色允许级别过滤，并再次验证候选元数据；未知角色的文档权限回退仅为 `public`。
+
+### 登录、限流与输入校验
+
+注册使用 bcrypt 哈希密码；登录签发 HS256 JWT，令牌有效期 24 小时。认证后聊天与上传会从数据库读取当前用户角色，而不是依赖令牌中可能过期的角色值。
+
+| 端点 | 计数范围 | 限额 |
+|---|---|---|
+| `/login` | 客户端 IP | 5 次 / 5 分钟；成功登录后重置该 IP 计数 |
+| `/register` | 客户端 IP | 5 次 / 1 小时 |
+| `/chat` | 用户 ID | 30 次 / 分钟 |
+| `/upload_doc` | 用户 ID | 20 次 / 分钟 |
+
+超限返回 `429` 和 `Retry-After`。限流器是有界的进程内滑动窗口；多 worker 或多实例之间不共享计数。注册用户名为 3–50 个非空白字符，密码为 8–128 个字符且 UTF-8 编码不超过 bcrypt 的 72 字节上限；聊天消息最多 8,000 字符，上传文本最多 100,000 字符、标题最多 200 字符。
+
+## RAG 检索链路
+
+1. `/upload_doc` 验证文档级别和上传者角色，然后切分文档并写入 Chroma 元数据。
+2. `TextChunker` 按空行分段、按句子边界拆分，保留 overlap；chunk 元数据包括 permission、title、doc_id、chunk_index、source、uploaded_by 和 created_at。
+3. Retriever 依次执行 Chroma 向量检索和关键词检索；两路都带文档权限过滤，并对返回元数据再次校验，再合并去重。
+4. 默认使用启发式重排，也提供可选 LLM reranker（异常时回退启发式）。只有重排后的检索结果会被格式化为编号片段供 KnowledgeSearch Skill 返回。
+5. 系统提示要求模型以 `[N]` 标注引用；被检索段落包在不可信内容边界中，并提示模型将其当作数据。
+
+默认 `TextChunker` 使用 `chunk_size=500`、`overlap=80`，按段落和句子边界组织文本，超长单元再切分。每个 chunk 保存 `permission`、`title`、`doc_id`、`chunk_index`、`source`、`uploaded_by`、`created_at` 等元数据，ID 为文档 ID 与 chunk 序号组合。默认 `Retriever` 每路最多取 10 个候选、向量距离阈值为 1.5，关键词召回最多使用 8 个提取词；中文关键词提取包含二元词组。`KnowledgeSearchSkill` 将候选数设为 10，启发式重排后默认返回 3 段。Retriever 独立调用的 `retrieve(..., top_k=5)` 默认值不同于 Skill 路径。可选 `LLMReranker` 最多接收 10 个候选，失败时回退启发式排序。以上数值是各实现路径的默认值，可由构造参数覆盖。
+
+权限在召回阶段执行，重排只处理已经过权限筛选的候选。提示词边界是降低提示注入风险的模型侧措施，不构成安全沙箱，也不证明攻击场景下绝无越权。输出守卫是尽力而为的日志监测：检测部分疑似密钥或注入文本模式，不拦截、不改写回答。
+
+`evals/rag_cases.jsonl` 给出查询、角色、相关标题和禁止标题；评价代码实现 hit rate、recall@k、MRR、no-result rate 与 permission leak 计数。它评价检索结果与标题标签，不评价生成答案真实性或引用忠实度。数据集规模较小，需扩充后才能作为有代表性的质量结论。
+
+## Memory 与用户数据范围
+
+MemoryManager 读取最近最多 20 条消息；达到摘要阈值后将较早对话交给 LLM 压缩，并保存 summary 和覆盖的消息 ID。Redis 使用 `summary:{user_id}` 缓存，TTL 为 300 秒；缓存格式异常或 Redis 读写失败时使用数据库记录/继续数据库路径。
+
+当前隔离范围是**用户级**：消息和摘要记录按 `user_id` 查询，缓存 key 也包含用户 ID。数据模型没有独立 conversation ID，因此不能声称同一用户的多个会话互相隔离。摘要提示要求总结事实和上下文，但没有单独保证保留全部权限约束；长期摘要保真仍需验证。
+
+### Memory 摘要 schema 升级
+
+应用的 ORM `create_all()` 只会创建缺失的表，不会升级已经存在的表或为旧表补列。升级旧版 `conversation_summaries` 前，先备份数据库，并确认要操作的 MySQL 主机和数据库名。迁移脚本不会读取 `.env`；必须在启动脚本的进程环境中显式设置非空 `MYSQL_HOST` 和 `MYSQL_DATABASE`，脚本不会替它们选择默认目标。`MYSQL_USER`、`MYSQL_PASSWORD` 和 `MYSQL_PORT` 也应按目标实例配置；用户和端口未设置时分别使用 `root` 和 `3306`。
+
+Windows PowerShell 示例（先激活已有虚拟环境，并将主机、数据库及凭据替换为已核实的目标值）：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:MYSQL_HOST = "127.0.0.1"
+$env:MYSQL_PORT = "3306"
+$env:MYSQL_USER = "root"
+$env:MYSQL_PASSWORD = "<目标实例密码>"
+$env:MYSQL_DATABASE = "agent_backend_dev"
+python scripts/upgrade_memory_summary_state.py
+```
+
+迁移只添加缺失且符合契约的状态列；重复执行可继续已部分完成的升级。若失败，先根据错误类别检查目标主机/库、账号权限和 `conversation_summaries` 现有字段定义；不兼容字段需要人工评估，脚本不会自动重建、删除或转换字段。确认备份和目标无误、并处理阻塞原因后，可对同一目标重新运行上述命令。MySQL DDL 可能逐列隐式提交，因此失败不代表整组 DDL 已回滚。仓库中的 SQLite 测试不能证明 MySQL 的 DDL、锁等待或事务行为；这些行为尚未在真实 MySQL 实例验证。
+
+## MCP 调用路径
+
+应用组装时 `MCPToolRegistry.refresh()` 向 MCP Client 查询工具列表，再将发现的名称、描述和输入 schema 包装为 Adapter，供 AgentLoop 转成模型工具 schema。AgentLoop 在执行时按 MCP 专用 allow-list 再查权限；Registry 对未知工具返回错误，对调用异常记录脱敏错误类别并返回安全错误文本。当前 MCPClient 使用 stdio 会话和专用事件循环线程，默认启动与调用超时均为 30 秒；`main.py` 的 MCP 调用超时也显式设为 30 秒。应用导入时刷新失败会记录异常并继续启动，因此当时发现的 MCP 工具不可用；此降级路径不等于真实 MCP 服务已验收。
+
+## 差旅预算工具
+
+`calculate_travel_budget` 要求 destination city、days 和 job_level；支持上海、北京、深圳、广州，职级为 employee、senior、manager。天数限制为 1–90 的整数；金额要求有限、非负且不超过单项上限。工具按天计算住宿和餐补、按行程总额计算交通，返回政策预算、实际总额、超限项目及模拟数据说明。
+
+可选参数为 `lodging_per_day`、`meal_per_day` 和 `transport_total`；未传时使用对应职级的模拟标准。上海、北京、深圳、广州共用同一组当前模拟值：employee 为 350/100/150，senior 为 500/150/250，manager 为 700/200/400（依次为住宿每日、餐补每日、整段行程交通总额）。必填字段缺失、未知参数、不支持城市或非法数值会拒绝并返回校验错误；每项费用最多 1,000,000，计算总额最多为 180,000,000。没有人数和日期输入，因此不会按人数缩放或根据日期调整。以上均为代码中的演示数据，不是公司制度金额。
+
+该工具目前是确定性本地计算逻辑。`evals/run_agent_eval.py` 中的自然语言案例由 case ID 选择固定参数，不会解析 `message`；缺失字段等案例检查的是工具校验路径。`evals/run_agent_loop_eval.py` 通过 Fake Client 将预设模型响应走过真实 AgentLoop 与工具注册流程；多轮更正场景能检查脚本给定的新参数是否执行正确，但不能证明真实模型能理解更正语句。
+
+## API
+
+| Endpoint | 用途 | 认证 |
+|---|---|---|
+| `POST /register` | 注册用户 | 否 |
+| `POST /login` | 登录并签发 JWT | 否 |
+| `POST /upload_doc` | 上传带权限级别的知识文档 | Bearer JWT |
+| `POST /chat` | 对话、工具调用和可选计划状态 | Bearer JWT |
+
+登录返回 `access_token`。`/chat` 请求体含 `message`，可选 `include_plan: true`；`/upload_doc` 接受 `text`、`permission` 和可选 `title`。登录、注册、聊天和上传有速率限制。`/chat` 的角色从数据库用户记录读取，不信任请求体自报角色。
+
+## 本地运行
+
+需要 Python 3.13、MySQL 和 Redis。应用默认连接本机 MySQL `agent_db` 与 Redis；LLM 请求使用 DeepSeek API。Chroma 使用本地 `./chroma_data` 持久化目录。
+
+### Windows 本地 Python
+
+在根目录创建本地 `.env`（该文件已被 `.gitignore` 忽略），用于 Windows 本地 Python 启动。设置以下变量。**填写本机真实值，不要把密钥提交到 Git：**
+
+```dotenv
+DEEPSEEK_API_KEY=<your-provider-key>
+MYSQL_PASSWORD=<your-local-mysql-password>
+JWT_SECRET_KEY=<random-secret-at-least-32-bytes>
 MYSQL_USER=root
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_DATABASE=agent_backend_dev
 REDIS_HOST=localhost
 REDIS_PORT=6379
-REDIS_PASSWORD=your-redis-password   # 可选，未设置时不做 AUTH
-CORS_ALLOW_ORIGINS=https://your-frontend.example.com
-AUTO_CREATE_TABLES=true     # 启动时自动补齐缺失表（不修改已有表）
-LOG_FILE=logs/agent-backend.log
+# 可选：REDIS_PASSWORD=<your-local-redis-password>
+AUTO_CREATE_TABLES=true
+CHROMA_PERSIST_DIRECTORY=D:/agent-backend-dev-data/chroma
+MCP_AUTO_REFRESH=false
 ```
 
-- 不设置 `CORS_ALLOW_ORIGINS` 时默认不开启跨域；多个来源用逗号分隔。
-- `AUTO_CREATE_TABLES=false` 可关闭自动建表（有正式迁移流程的环境）。
-- `REDIS_PASSWORD` 仅在 Redis 启用了 `requirepass` 时需要；留空或删除该行即按无密码连接。
-- 设置 `LOG_FILE` 后日志同时写入轮转文件（5MB × 3），每行带 `request_id`，可用 `X-Request-ID` 请求头串联一次请求的所有日志。
+| 配置项 | 默认值 | 作用 |
+|---|---|---|
+| `MYSQL_DATABASE` | `agent_db` | 指定 MySQL 数据库名。改名不代表目标数据库已经安全；必须确认它是专用开发数据库。Compose 会把同一个值传给应用和 MySQL 服务。 |
+| `CHROMA_PERSIST_DIRECTORY` | `./chroma_data` | 指定 Chroma 持久化目录；相对路径按进程当前工作目录解析。Windows 本地开发建议使用仓库原有 `chroma_data` 之外的独立目录。 |
+| `MCP_AUTO_REFRESH` | `false` | 控制应用导入时是否自动刷新 MCP Registry。值需为明确布尔值（`true`/`false`、`1`/`0`、`yes`/`no` 或 `on`/`off`）。 |
 
-依赖服务：MySQL（库名 `agent_db`）、Redis、DeepSeek API。
+关闭 `MCP_AUTO_REFRESH` 只关闭导入时的自动发现，不会删除 MCP Client、Registry 或 Adapter；需要使用 MCP 时显式设为 `true`。`MYSQL_USER`、`MYSQL_HOST`、`MYSQL_PORT`、`REDIS_HOST`、`REDIS_PORT` 有本地默认值；`DEEPSEEK_API_KEY`、`MYSQL_PASSWORD` 和 `JWT_SECRET_KEY` 是启动所需配置。其他可选项包括 `REDIS_PASSWORD`、`CORS_ALLOW_ORIGINS`、`LOG_LEVEL`、`LOG_FILE` 及 `AUTO_CREATE_TABLES`。
 
-表结构默认**自动创建**：`AUTO_CREATE_TABLES=true`（代码默认值，无需在 `.env` 中显式设置）会在启动时补齐缺失的 `users` / `messages` / `conversation_summaries` 三张表，且不会修改已有表。只有设置 `AUTO_CREATE_TABLES=false` 的环境（例如已有正式迁移流程）才需要自行执行 DDL 建表。
+`AUTO_CREATE_TABLES=false` 只跳过应用导入阶段的自动建表，不隔离数据库，也不阻止后续 API 请求读写数据库。只有确认 MySQL 指向专用开发库后，才应决定是否启用自动建表；禁用时需自行准备兼容的 schema。
+
+### Docker Compose
+
+Compose 对应用容器和 MySQL 初始化配置使用同一个 `${MYSQL_DATABASE:-agent_db}` 插值结果；通常从根目录 `.env` 读取，未设置时两边均为 `agent_db`。若改用其他数据库名，两边仍保持一致。`AUTO_CREATE_TABLES` 仍控制应用启动时是否建表，不提供数据库隔离。
+
+Compose 会在应用容器环境中将 `CHROMA_PERSIST_DIRECTORY` 固定为 `/app/chroma_data`，并由 `chroma_data` 命名卷挂载持久化。它会覆盖 `.env` 中给 Windows 本地 Python 使用的 Chroma 路径；不要把 Windows 路径传给容器。`MCP_AUTO_REFRESH` 默认关闭，需要应用启动时发现 MCP 工具时再显式设为 `true`。
 
 ```bash
+python -m venv .venv
+# 激活虚拟环境后：
+pip install -r requirements.txt
 uvicorn main:app --reload
+```
+
+若使用 Docker Compose，可在配置好 `.env` 后运行：
+
+```bash
+docker compose up --build
+```
+
+仓库提供 `Dockerfile` 与 `docker-compose.yml`，Compose 配置会启动 API、MySQL 和 Redis。Compose 使用 `.env`，其中 `MYSQL_PASSWORD` 必须设置。运行或部署前请自行检查数据卷、网络、密钥管理和环境隔离；本仓库代码存在不等于生产部署已验证。
+
+Compose 将 API 暴露在主机 `8000` 端口，MySQL 与 Redis 仅在 Compose 网络内供应用连接；`mysql_data`、`redis_data`、`chroma_data` 和 `app_logs` 为命名卷。MySQL healthcheck 等待数据库可用，API 依赖 MySQL healthy 和 Redis started。Dockerfile 以 UID 10001 的 `appuser` 运行 API。配置中的 MySQL 初始账号为 root，部署前应评估并按需改用权限受限账号；这些配置是本地/容器启动基线，不代表生产安全审查已完成。
+
+## 测试与评测
+
+运行测试：
+
+```bash
 pytest -q
 ```
 
----
+`.github/workflows/ci.yml` 在 push 和 pull request 时使用 Python 3.13，启动 MySQL 8.4 与 Redis 7，安装 `requirements.txt`，运行 `pytest -q` 和 `python evals/run_rag_eval.py`。这是 CI 工作流定义，不表示当前工作区对应提交已通过 CI。当前 `main` 已包含根目录 pytest `conftest.py`：它在 pytest 收集阶段把应用导入接到临时 SQLite 和离线替身。该隔离由 pytest 配置提供，不会自动应用于独立运行的脚本；运行独立评测时仍需分别检查其调用路径和外部依赖。
 
-## 1. 项目架构
-
-```text
-                         User
-                           │
-                           ▼
-                        FastAPI
-                           │
-                           ▼
-                      AgentLoop
-                           │
-          ┌────────────────┼────────────────┐
-          │                │                │
-          ▼                ▼                ▼
-       Planner         Skill Registry    MCP Registry
-          │                │                │
-       TaskState           │                │
-          │                ▼                ▼
-          │             Tool Registry    MCP Adapter
-          │                │                │
-          └────────────────┼────────────────┘
-                           │
-                           ▼
-                  Permission Checker
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-             Tool         Skill         MCP
-              │            │            │
-              └────────────┼────────────┘
-                           ▼
-                          LLM
-                           │
-                           ▼
-                         Memory
-                           │
-                  ┌────────┴────────┐
-                  ▼                 ▼
-                MySQL             Redis
-```
-
----
-
-## 2. 已完成模块
-
-### Agent Core
-
-- Agent Loop
-- 多轮 Tool Calling
-- Tool Registry
-- Skill Registry
-- Tool 参数处理
-- Tool 错误反馈
-- Retry / Recovery 基础能力
-- Permission Checker
-- Task State / Planner 基础代码
-
-### Tools
-
-当前已经接入：
-
-- Calculator
-- Current Time
-- Tool 统一注册
-- Tool schema
-- Tool 参数处理与执行
-
-### Skills
-
-当前主要 Skill：
-
-- Knowledge Search
-- Data Analysis
-
-Skill 可以通过统一 Registry 被 Agent 调用，并受到角色权限控制。
-
----
-
-## 3. 权限系统
-
-项目采用统一的 `PermissionChecker` 管理角色权限和文档权限。
-
-### Role → Skill
-
-```text
-employee
-├── knowledge_search
-├── calculate
-└── get_current_time
-
-finance
-├── knowledge_search
-├── calculate
-├── get_current_time
-└── data_analysis
-
-admin
-├── knowledge_search
-├── calculate
-├── get_current_time
-└── data_analysis
-```
-
-基础 Tool 与 Skill 在 AgentLoop 中于**实际执行前**做程序侧权限校验，不依赖 Planner 隐藏工具。三类执行入口（基础 Tool、Skill、MCP）策略一致：`PermissionChecker` 缺失时**一律拒绝执行**（deny-by-default），不存在“没配 checker 就放行”的分支。
-
-### MCP 工具授权（deny-by-default）
-
-MCP 工具动态发现，因此采用显式授权映射 `PermissionChecker.MCP_ROLE_PERMISSIONS`：
-
-```text
-get_company_info → {employee, finance, admin}   # 静态公开信息
-（未登记的任何 MCP 工具 → 所有角色默认拒绝）
-```
-
-- 当前仅显式登记 `get_company_info`（只返回静态公开公司资料，敏感度等同 `get_current_time`）。
-- 其他 MCP 工具一律默认拒绝，不隐式继承任何角色权限；新增 MCP 工具必须显式登记后才可用。
-
-### Document Permission
-
-```text
-public
-employee
-finance
-admin
-```
-
-文档上传权限已经统一使用：
-
-```text
-PermissionChecker.DOCUMENT_PERMISSIONS
-```
-
-避免 Knowledge Search 和 Upload Document 各自维护重复权限规则。
-
-同时已经增加非法文档权限校验，例如：
-
-```text
-permission = "invalid"
-        ↓
-拒绝
-```
-
----
-
-## 4. RAG
-
-RAG 检索链路位于 `app/rag/`：
-
-```text
-Document
-   ↓  TextChunker（标题/段落/句子切分 + overlap）
-Chunk
-   ↓  ingest_document（结构化元数据）
-Chroma
-   ↓
-Vector Query ──┐   Keyword Query（$contains / $or）
-   ↓           │      ↓
- distance 阈值 │      词命中率打分
-   └───── 合并去重 ─────┘
-   ↓
- Reranker（启发式 / 可选 LLM）
-   ↓
- Top-K 编号片段
-   ↓
- LLM 按 [N] 引用作答
-```
-
-### 切分与元数据
-
-```python
-TextChunker(chunk_size=500, overlap=80)
-```
-
-- 先按 Markdown 标题 / 空行分段，再按中英文句子切分，超长段落硬切并保留重叠
-- 每个 chunk 保存 `permission`、`title`、`doc_id`、`chunk_index`、`source`、`uploaded_by`、`created_at`
-- chunk id 形如 `{doc_id}:{index}`，支持按文档删除与重建
-
-### 召回配置
-
-```python
-n_results = 10            # 候选集，交给重排
-distance_threshold = 1.5  # 向量腿低相关过滤
-keyword_limit = 8         # 关键词腿最多 8 个词（中文取 2-gram）
-top_k = 3                 # 重排后进入 LLM 的片段数
-```
-
-两路结果按 id 合并去重，双路命中会额外加分。
-
-### 重排与引用
-
-- 默认 `HeuristicReranker`：词面重合 + 标题加权 + 原始召回分，本地零成本
-- 可选 `LLMReranker`：用 DeepSeek 给候选排序，失败自动回退启发式
-- `knowledge_search` 返回编号片段：
-
-```text
-[1] 差旅报销标准 (permission=employee, score=0.61)
-...
-```
-
-System Prompt 会要求模型按 `[N]` 标注出处。
-
-### 当前状态
-
-```text
-文档切分              ✅ 标题/段落/句子 + overlap
-结构化元数据          ✅
-Embedding             ✅
-Chroma                ✅
-向量 + 关键词混合召回 ✅
-Top-K                 ✅
-Distance Filtering    ✅
-文档上传权限          ✅
-RAG 文档级检索权限    ✅
-重排                  ✅ 启发式 / 可选 LLM
-答案引用来源          ✅
-```
-
----
-
-## 5. MCP
-
-已经完成 Agent 与 MCP 的基础集成。
-
-当前架构：
-
-```text
-AgentLoop
-    ↓
-MCPToolRegistry
-    ↓
-MCPToolAdapter
-    ↓
-MCPClient
-    ↓
-Thread
-    ↓
-Event Loop
-    ↓
-MCP Server
-```
-
-MCP Client 已处理：
-
-- MCP Server 启动
-- 独立 Thread
-- Async Event Loop
-- `ClientSession`
-- `initialize()`
-- `list_tools()`
-- `call_tool()`
-- Session 生命周期管理
-
-MCP Tool 会通过 Adapter 转换成 AgentLoop 可以统一调用的 Tool。
-
----
-
-## 6. Memory
-
-已经实现持久化对话 Memory。
-
-当前包括：
-
-- 多轮对话历史
-- Conversation Summary
-- 长对话自动压缩
-- 数据库保存 Summary
-- Redis Summary Cache
-
-基本流程：
-
-```text
-Conversation
-     ↓
-History
-     ↓
-达到压缩阈值
-     ↓
-Summary
-     ↓
-ConversationSummary
-     ↓
-Redis Cache
-```
-
-Redis Summary Key：
-
-```text
-summary:{user_id}
-```
-
-并设置 TTL。
-
----
-
-## 7. 多用户隔离
-
-项目支持基于 `user_id` 的用户数据隔离。
-
-主要应用于：
-
-- Conversation History
-- Memory Summary
-- Redis Cache
-
-目标是让不同用户之间的 Agent 上下文和历史数据相互隔离。
-
----
-
-## 8. Authentication
-
-项目已经包含基础用户认证能力：
-
-- 注册
-- 登录
-- bcrypt 密码哈希
-- JWT
-- 用户角色
-
-主要 API：
-
-```text
-POST /register
-POST /login
-```
-
-### 限流与输入校验
-
-| 端点 | 维度 | 预算 | 说明 |
-| --- | --- | --- | --- |
-| `POST /login` | 客户端 IP | 5 次 / 5 分钟 | **按 IP 计数，不包含用户名**：换用户名不会重置预算；登录成功后清零该 IP 计数 |
-| `POST /register` | 客户端 IP | 5 次 / 1 小时 | 与登录使用各自独立的计数器 |
-| `POST /chat` | 用户 | 30 次 / 分钟 | 在写入历史和调用 LLM **之前**返回 `429`，被拒请求不留半截数据 |
-| `POST /upload_doc` | 用户 | 20 次 / 分钟 | 在权限校验与入库**之前**返回 `429` |
-
-- 超限统一返回 `429`，并带 `Retry-After` 响应头。
-- 注册输入校验：用户名 3–50 位且不含空白；密码 8–128 字节且不超过 bcrypt 的 72 字节上限。
-- 计数器保存在**进程内存**中：单进程部署有效；多 worker / 多实例部署需要改用 Redis 等共享存储。
-- 计数器内存有界：过期事件与闲置 key 会自动回收，key 数量超过上限（默认 1 万）时按 LRU 淘汰，大量唯一 key 无法无限撑大内存。
-
----
-
-## 9. API
-
-当前主要 API：
-
-```text
-POST /register
-POST /login
-POST /upload_doc
-POST /chat
-```
-
-`POST /upload_doc` 支持可选 `title`，入库时记录 `uploaded_by`。
-
-> **中文上传注意事项（Windows PowerShell 5.1）**
->
-> PowerShell 5.1 的 `Invoke-RestMethod` 在 `-ContentType` 未声明
-> `charset=utf-8` 时，会把请求体中的中文逐字符替换为字面量 `?`
-> （请求尚未到达服务端即已损坏）。上传中文文档必须显式声明编码：
->
-> ```powershell
-> $json = '{"text":"接口测试内容","permission":"employee","title":"接口测试"}'
-> Invoke-RestMethod -Uri "http://127.0.0.1:8000/upload_doc" `
->   -Method Post `
->   -Headers @{ Authorization = "Bearer $token" } `
->   -ContentType 'application/json; charset=utf-8' `
->   -Body $json
-> ```
->
-> 更稳妥的方式是显式构造 UTF-8 请求字节再发送，例如使用
-> `curl.exe --data-binary "@utf8.json"`（文件须存为 UTF-8）或
-> Python `requests.post(..., data=json.dumps(payload,
-> ensure_ascii=False).encode("utf-8"), headers={"Content-Type":
-> "application/json; charset=utf-8"})`。
->
-> 注意：客户端丢失的中文无法由服务端恢复；请勿期望通过修改
-> `ingest_document()` / `TextChunker` 修复已变成 `?` 的数据。
-
-`POST /chat` 支持可选 `include_plan`：
-
-```json
-{"message": "帮我查一下差旅标准", "include_plan": true}
-```
-
-返回值额外包含 `plan`：
-
-```json
-{
-  "reply": "...",
-  "plan": {
-    "status": "completed",
-    "total": 2,
-    "completed": 2,
-    "failed": 0,
-    "pending": 0,
-    "running": 0,
-    "steps": [
-      {"description": "查询差旅标准", "tools": ["knowledge_search"], "status": "completed", "retry_count": 0}
-    ]
-  }
-}
-```
-
-`status` 取值：`completed` / `in_progress` / `failed`；没有 Planner 时为 `null`。
-
----
-
-## 10. 测试
-
-历史全量测试记录（2026-10-19；不代表当前测试总数）：
-
-```text
-收集 368 项 —— 368 passed / 0 failed / 0 skipped / 5 warnings
-```
-
-以上是本机（Python 3.13）于 2026-10-19 执行 `python -m pytest -q` 的历史验证记录，耗时约 29s。它没有覆盖之后增加的测试，因此不应视为当前测试总数或当前通过结果。该次验证使用一次性 MySQL 8.4 容器与独立 Redis 容器，开发库零写入；5 条警告全部是 PyJWT 的 `InsecureKeyLengthWarning`（测试所用 `JWT_SECRET_KEY` 为 16 字节，低于 HS256 建议的 32 字节；`main.py` 启动时也会打印一条只含长度的告警）。
-
-该次记录中仅 **1 项**会写数据库：`test_main.py::test_register_new_user` 通过 `/register` 追加测试用户（uuid 命名、只增不改不删），写入的是上述一次性容器。B7 隔离改造后，`tests/test_degradation.py` 与 `tests/test_upload_encoding.py` 均通过 `_StubDB` + `get_db` override 在内存中完成，不再触碰 MySQL。其余 367 项仅使用 Fake/Stub，不写库、不写向量库、不调用外部 LLM（`evals/run_rag_eval.py` 使用临时目录中的独立 Chroma collection）。
-
-测试覆盖主要包括：
-
-- Tools
-- Tool Registry
-- Agent Loop
-- Skills
-- Permission
-- Document Upload Permission
-- Memory
-- MCP
-- RAG Chunker / Ingest / Retriever / Reranker
-- Knowledge Search 引用与权限
-- Planner / Task State 相关基础能力
-- Planner 失败降级、角色过滤、步数预算
-- Retry / Recovery
-- Error Handling
-- 登录 / 注册限流与输入校验
-- 登录限流按 IP 计数（换用户名无法绕过）、限流计数器过期回收与容量上限、`/chat` 与 `/upload_doc` 按用户限流（`tests/test_endpoint_rate_limits.py`）
-- 问候识别回归：英文子串误判不再跳过 Planner（`tests/test_text.py`）
-- 错误脱敏：裸 `sk-…` 密钥与 `/E:/…` 形式路径（`tests/test_error_sanitization.py`）
-- Agent 并发请求状态隔离
-- 注入防护：工具执行时权限校验、三类执行入口缺失 checker 时一律拒绝（`tests/test_rag_injection.py`）
-- 摘要 / 计划信任边界标记（`tests/test_context_trust.py`）
-- 输出层风险扫描与日志脱敏（`tests/test_output_guard.py`）
-
-每次重要功能修改后都会执行完整 pytest，确保已有 Agent 能力没有被破坏。
-
-### RAG 评测
+运行 RAG 本地检索评测（使用临时 Chroma collection）：
 
 ```bash
 python evals/run_rag_eval.py
 ```
 
-```text
-数据集   evals/rag_cases.jsonl   查询 + 角色 + 相关/禁止标题
-语料     evals/corpus.jsonl      5 篇企业文档
-指标     hit_rate / recall@k / MRR / no_result_rate / permission_leaks
-```
+该评测不调用生成式 LLM，默认使用启发式重排；Chroma 的默认 embedding function 依赖的模型是否需要首次下载，取决于本机缓存和安装版本，不能仅凭脚本本身保证完全离线。
 
-评测会真实入库并检索，权限泄漏数大于 0 时进程返回非 0 退出码，可直接接进 CI。
-
-当前指标：
-
-```text
-cases=8 top_k=3 hit_rate=1.0 recall@3=1.0 mrr=1.0 permission_leaks=0
-```
-
----
-
-## 11. 当前项目状态
-
-```text
-Tool Registry              ✅
-Skill Registry             ✅
-Agent Loop                 ✅
-Tool Calling               ✅
-Role → Skill Permission    ✅
-Document Upload Permission ✅
-RAG 智能切分 + 元数据      ✅
-RAG 混合召回               ✅
-RAG 重排 + 引用来源        ✅
-RAG 文档级检索权限         ✅
-Memory                     ✅
-Redis                      ✅
-Multi-user                 ✅
-Authentication             ✅
-MCP 基础集成               ✅
-Planner 完整接入           ✅
-TaskState 状态回传         ✅
-Planner 角色过滤 + 降级    ✅
-RAG 评测集                 ✅
-pytest                     ✅ 368/368 passed / 0 skipped / 5 warnings（JWT 密钥长度）
-限流端点测试               ✅ 路由层 429 / Retry-After / 成功重置 / IP·用户隔离
-X-Request-ID 校验          ✅ 白名单字符集 + 长度上限，非法值服务端重新生成
-能力清单按角色过滤          ✅ 模型只看到本角色可执行的 tool/skill/MCP
-数据库引导脱敏             ✅ 驱动缺失/DSN 错误 → 分类错误码，不回显 DSN
-Compose healthcheck        ✅ MYSQL_PWD 传参，密码不进进程参数
-脱敏边界测试               ✅ 明确"能脱什么/不能脱什么"，不承诺绝对不泄露
-rag_eval                   ✅ hit_rate=1.0 leaks=0
-登录限流 / 注册校验        ✅ 登录按 IP 计数，换用户名不可绕过
-chat / upload 限流          ✅ 每用户 30/min、20/min，写库前拦截
-限流计数器内存有界          ✅ 过期回收 + key 上限 LRU 淘汰
-依赖故障降级               ✅ Redis / MCP / MySQL
-并发状态隔离               ✅
-输入长度限制               ✅
-问候跳过 Planner           ✅ 整词匹配，普通英文句子不误判
-历史消息限量               ✅
-Tool / Skill / MCP 权限校验 ✅ deny-by-default（checker 缺失一律拒绝）
-MCP 显式授权映射           ✅ MCP_ROLE_PERMISSIONS
-错误脱敏扩展               ✅ 裸 sk-… 密钥、/E:/… 正斜杠路径
-JWT 过期时间               ✅ 时区感知 UTC（不再用 utcnow）
-RAG 不可信内容隔离         ✅ untrusted_document 边界
-摘要 / 计划信任边界        ✅ 标记为对话生成上下文
-输出层风险扫描             ✅ 仅告警，非防泄漏保证
-
-Agent + Memory 深度结合    🚧
-MCP 高级能力               ⏳
-Observability              ✅ request_id 日志 / 轮转
-Docker 部署                ✅ docker compose
-CI                        ✅ pytest + rag_eval
-```
-
----
-
-## 12. 下一阶段路线
-
-### Phase 1：完善 Planner（已完成）
-
-执行链路：
-
-```text
-User Task
-   ↓
-Planner
-   ↓
-TaskState
-   ↓
-Step 1
-   ↓
-Tool / Skill
-   ↓
-Result
-   ↓
-TaskState Update
-   ↓
-Step 2
-   ↓
-...
-   ↓
-Final Answer
-```
-
-重点（已完成）：
-
-- Planner 真正参与 Agent 执行，`create_plan` 抛错时记录日志并降级为无计划模式，请求不会 500
-- Planner 按角色过滤可用 Tool / Skill，无权使用的能力不会进入计划
-- TaskState 记录任务状态与重试次数，Step 与 Tool / Skill 对应
-- 支持任务成功 / 失败 / 重试，`summary()` 汇总整体状态
-- `max_steps` 随计划长度自动放大，长计划不会被截断
-- `/chat` 支持 `include_plan` 回传计划状态
-- 增加完整集成测试
-
-### Phase 2：RAG 质量（已完成）
-
-已完成：
-
-- 检索阶段的文档权限过滤
-- 智能切分（标题 / 段落 / 句子 + overlap）与结构化元数据
-- 向量 + 关键词混合召回与去重融合
-- 启发式重排，可切换 LLM 重排
-- 带编号引用的回答与 Prompt 约束
-
-```text
-employee
-    ↓
-public + employee
-
-finance
-    ↓
-public + employee + finance
-
-admin
-    ↓
-全部
-```
-
-后续可继续：
-
-- 接入 Cross-Encoder 或专用 Embedding Rerank 模型
-- 中文关键词召回升级为 BM25
-- RAG 检索质量评测集
-
-### Phase 3：Agent + Memory
-
-进一步让 Memory 深度进入 Agent：
-
-```text
-User
- ↓
-Memory
- ↓
-Agent
- ↓
-Tool / Skill / RAG / MCP
- ↓
-Result
- ↓
-Memory
-```
-
-### Phase 4：MCP 高级能力
-
-继续完善：
-
-- 动态 Tool Discovery
-- MCP Tool 生命周期
-- 多 MCP Server
-- Agent 动态扩展外部工具
-
-### Phase 5：工程化
-
-后续继续加入：
-
-- Agent Evaluation
-- Logging / Observability
-- Docker
-- 部署
-- 更完整的集成测试
-
----
-
-## 13. 部署
-
-### Docker Compose（推荐）
+运行 AgentLoop Fake Client 离线场景：
 
 ```bash
-docker compose up -d --build
+python evals/run_agent_loop_eval.py
 ```
 
-一键拉起 app + MySQL + Redis：
+该 AgentLoop 脚本默认离线；真实模型请求只在显式传入 `--live` 且提供相应环境变量时启用。Live 评测会发起外部网络 API 请求并可能产生费用，运行前应检查案例、预算和输出选项。此前 F2 验收记录中，AgentLoop Fake 评测的 12 个场景全部通过（12/12），Fake Client 共记录 29 次模型调用尝试，工具实际执行 11 次；这些是预设响应下的流程指标，不是自然语言理解成功率。Fake Client 的 usage 也不等于真实 API token 用量或费用。差旅工具契约评测共 20 案，18 passed、2 failed；已知失败 `correct_city`、`correct_days` 保持失败，runner 预期退出码为 1。这是工具契约检查，不是自然语言模型评测。本 README 修订过程中没有运行 pytest、RAG 评测或真实模型评测，因此不报告本轮新跑出的结果。仓库中的测试文件是覆盖意图，不等同于测试通过记录；CI 配置声明了 pytest 和 RAG 评测步骤，也不代表本次提交已经通过 CI。
 
-- `MYSQL_HOST=mysql`、`REDIS_HOST=redis` 由 compose 注入，无需改代码
-- `AUTO_CREATE_TABLES=true` 启动时自动建表
-- Chroma 向量库与日志通过 volume 持久化
-- app 镜像以非 root 用户（UID 10001）运行
-- compose 的 `mysql` 服务只创建 root 账号；app 默认 `MYSQL_USER=root`。如需普通账号，请在容器内创建并同步调整 `.env` 的 `MYSQL_USER` / `MYSQL_PASSWORD`
+`evals/run_agent_eval.py` 中的 `correct_city` 和 `correct_days` 是当前尚未实现的更正场景；案例标记为 `not_implemented`，但 runner 仍将它们计为失败，并会因此返回非零退出码。判读该评测时，应把常规工具契约验收与这两项已知功能缺口区分开；它们不是通过的功能验收，不能通过降低断言或伪造通过来消除红项。该 runner 根据案例 ID 选择固定参数，不解析自然语言，因此结果不代表自然语言理解能力。
 
-### CI
+## 安全与当前边界
 
-`.github/workflows/ci.yml`：每次 push / PR 自动起 MySQL + Redis 服务容器，执行 `pytest -q` 与 `python evals/run_rag_eval.py`（权限泄漏数 > 0 时 CI 失败）。
+- 不要提交 `.env`、API Key、MySQL/Redis 密码或 JWT 签名密钥。使用环境变量或本机 `.env`；生产环境应使用专门的 Secret 管理服务。
+- `JWT_SECRET_KEY` 应为足够长的随机值；代码只记录密钥长度告警，不应将密钥值写入日志。
+- Tool/Skill/MCP 的权限校验在 AgentLoop 执行层再次完成；RAG 文档权限过滤在两路召回中执行。提示词和输出扫描不是权限边界的替代品。
+- 用户消息、摘要和检索文档是不可信输入；摘要与 RAG 注入防护仍需要对抗性场景验证。
+- 请求预算限制的是特定 Planner/AgentLoop 路径上的序列化字符数，不是 Token 计数，也没有供应商在线验证；不能据此推断其他模型请求路径均已受保护。
+- 项目没有按 conversation ID 隔离历史；MCP 目前演示 stdio 集成，尚无多服务器编排或生产 MCP 服务验证。
+- 差旅标准是模拟数据；没有接入公司制度源或真实报销 API。
+- Agent 与 Memory 有持久化和摘要路径，但还没有基于真实模型的长期记忆质量评测。
 
----
+## 后续计划
 
-## 14. 技术栈
-
-- Python
-- FastAPI
-- DeepSeek API
-- SQLAlchemy
-- MySQL
-- Redis
-- Chroma
-- JWT
-- bcrypt
-- pytest
-- MCP
-
----
-
-## 15. 项目定位
-
-## 16. 差旅助手 MVP（新增）
-
-项目现在包含一个可复现的差旅预算 MVP：`calculate_travel_budget` 是确定性工具，按职级返回住宿、餐补和交通标准、实际费用、总额、超标项、假设和模拟数据标记。标准覆盖城市仅为上海、北京、深圳、广州；四城当前使用相同的模拟职级标准，其他城市返回输入错误，不套用默认值。每项费用必须为有限的非负数且不超过 1,000,000；天数为 1–90 的整数。该数据不是企业真实制度，也不能用于实际报销决策。
-
-运行固定验收集：
-
-```bash
-python evals/run_agent_eval.py
-```
-
-任务集位于 `evals/agent_cases.jsonl`，包含 20 个固定场景 ID。`evals/run_agent_eval.py` 按案例 ID 选择预设参数，直接验证差旅工具行为；只有权限案例驱动 AgentLoop。JSONL 中的自然语言 `message` 不会被解析，因此该脚本的通过率是确定性工具/权限契约检查结果，不是自然语言端到端或真实模型成功率。2026-10-20 的本地历史记录为 18/20；`correct_city` 和 `correct_days` 报告为 `not_implemented` 并计为失败。
-
-`evals/run_agent_loop_eval.py` 另提供 11 个 Fake Client 场景，实际执行 AgentLoop、工具注册和权限路径，但模型响应由脚本预设；其通过率只说明这些离线执行路径和断言通过，不能证明真实模型理解或多轮更正能力。脚本也有显式 `--live` 模式，但本项目尚未在此记录真实模型评测结果。Fake 响应中的 usage 是模拟指标；真实 Token 只能在 live 响应提供合法 usage 时报告。live 报告中的 `llm_call_attempt_count` 统计进入 `create()` 的尝试（包括被预算拒绝的尝试），`global_llm_forwarded_request_attempt_count` 统计通过预算检查并转发给客户端的请求尝试。
-
-差旅工具按天数计算住宿和餐补，并将交通费用视为整段行程总额；输入没有出行人数或起止日期，因此结果不按人数缩放、也不根据具体日期调整。所有标准均为模拟数据，不代表真实企业差旅制度或报销结论。
-
-AgentLoop 还提供工具调用预算（默认 12 次）和上下文字符预算（默认 24,000），超过预算会安全终止或裁剪最旧上下文。生产环境仍需在 API 网关或异步任务层增加硬超时。
-
-最终目标：
-
-> 构建一个面向企业内部场景的 AI Agent 后端，能够根据用户权限访问企业知识库、调用工具、分析数据、使用外部 MCP 工具，并通过 Memory 支持持续的多轮任务。
-
-本项目同时用于系统学习：
-
-- Agent Loop
-- Tool Calling
-- Skill Architecture
-- Planner
-- Task State
-- RAG
-- Memory
-- MCP
-- Permission System
-- Agent Backend Engineering
-
-项目重点不是简单调用 LLM API，而是理解并实现一个 **可扩展、可测试、具有权限控制和工具编排能力的 Agent 后端架构**。
+1. 对用户级与会话级 Memory 边界作产品决定；如支持多会话，增加 conversation ID 和隔离测试。
+2. 扩充标注语料和 RAG 查询集，单独评估生成答案与引用质量。
+3. 在受控预算和脱敏条件下补充真实模型评测；清楚区分在线模型结果与 Fake Client 离线结果。
+4. 按需完善 MCP 多 server、幂等工具、副作用控制和部署验证。
